@@ -20,6 +20,7 @@ canvas{display:block}
 .user{align-self:flex-start;background:#1f2937}
 .user.pending{background:#9ca3af;color:#111827;animation:userPendingPulse 1.25s ease-in-out infinite}
 .assistant{align-self:flex-end;background:#374151}
+.msg .speaking-current{color:#fde68a;text-shadow:0 0 10px rgba(253,230,138,.35)}
 @keyframes userPendingPulse{
   0%{opacity:.92;transform:translateZ(0)}
   50%{opacity:1;filter:brightness(1.08)}
@@ -326,8 +327,18 @@ function renderMarkdown(text) {
   return html;
 }
 
-function setMsgContent(el, text) {
+function renderPlainText(text) {
+  return escapeHtml(text || '').replace(/\r\n/g, '\n').replace(/\n/g, '<br>');
+}
+
+function setMsgContent(el, text, options = null) {
   el.dataset.raw = text || '';
+  const baseText = options && typeof options.baseText === 'string' ? options.baseText : '';
+  const highlightText = options && typeof options.highlightText === 'string' ? options.highlightText : '';
+  if (highlightText) {
+    el.innerHTML = `${renderPlainText(baseText)}<span class="speaking-current">${renderPlainText(highlightText)}</span>`;
+    return;
+  }
   el.innerHTML = renderMarkdown(el.dataset.raw);
 }
 
@@ -349,7 +360,6 @@ function appendMsg(role, text){
   item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
   setMsgContent(item, text);
   chatList.appendChild(item);
-  chatPanel.scrollTop = chatPanel.scrollHeight;
 }
 
 let ws;
@@ -357,32 +367,38 @@ let pendingUserItem = null;
 let turnLocked = false;
 let currentAssistantItem = null;
 let currentAssistantText = '';
+let currentAssistantCommittedText = '';
 let currentAssistantRevealTimer = null;
 let currentAssistantRevealReqId = null;
 let currentAssistantRevealBaseText = '';
 let currentAssistantRevealSegmentText = '';
 let currentAssistantRevealStartedAt = 0;
 let currentAssistantRevealAudioEl = null;
+const finishedAssistantRevealReqIds = new Set();
 let pendingAssistantStreamText = '';
 let assistantSpeechStartedThisTurn = false;
 let assistantSpeechQueuedThisTurn = false;
 
-function clearAssistantRevealTimer() {
+function clearAssistantRevealTimer(resetState = true) {
   if (currentAssistantRevealTimer) {
     clearInterval(currentAssistantRevealTimer);
     currentAssistantRevealTimer = null;
   }
-  currentAssistantRevealReqId = null;
-  currentAssistantRevealBaseText = '';
-  currentAssistantRevealSegmentText = '';
-  currentAssistantRevealStartedAt = 0;
-  currentAssistantRevealAudioEl = null;
+  if (resetState) {
+    currentAssistantRevealReqId = null;
+    currentAssistantRevealBaseText = '';
+    currentAssistantRevealSegmentText = '';
+    currentAssistantRevealStartedAt = 0;
+    currentAssistantRevealAudioEl = null;
+  }
 }
 
 function releaseAssistantTurnContext() {
   clearAssistantRevealTimer();
   currentAssistantItem = null;
   currentAssistantText = '';
+  currentAssistantCommittedText = '';
+  finishedAssistantRevealReqIds.clear();
   pendingAssistantStreamText = '';
   assistantSpeechStartedThisTurn = false;
   assistantSpeechQueuedThisTurn = false;
@@ -396,9 +412,9 @@ function ensureAssistantItem() {
   item.className = 'msg assistant streaming';
   item.dataset.raw = '';
   chatList.appendChild(item);
-  chatPanel.scrollTop = chatPanel.scrollHeight;
   currentAssistantItem = item;
   currentAssistantText = '';
+  currentAssistantCommittedText = '';
   return item;
 }
 
@@ -406,7 +422,22 @@ function setAssistantItemText(text) {
   const item = ensureAssistantItem();
   currentAssistantText = text || '';
   setMsgContent(item, currentAssistantText);
-  chatPanel.scrollTop = chatPanel.scrollHeight;
+}
+
+function setAssistantRevealItemText(baseText, revealText) {
+  const item = ensureAssistantItem();
+  const safeBaseText = baseText || '';
+  const safeRevealText = revealText || '';
+  currentAssistantText = safeBaseText + safeRevealText;
+  setMsgContent(item, currentAssistantText, {
+    baseText: safeBaseText,
+    highlightText: safeRevealText
+  });
+}
+
+function commitAssistantItemText(text) {
+  currentAssistantCommittedText = text || '';
+  setAssistantItemText(currentAssistantCommittedText);
 }
 
 function beginAssistantTurn(seedText = '') {
@@ -450,9 +481,9 @@ function syncAssistantRevealProgress(forceFull = false) {
   }
   ratio = Math.max(0, Math.min(1, ratio));
   const revealCount = forceFull ? currentAssistantRevealSegmentText.length : Math.max(1, Math.ceil(currentAssistantRevealSegmentText.length * ratio));
-  setAssistantItemText(currentAssistantRevealBaseText + currentAssistantRevealSegmentText.slice(0, revealCount));
+  setAssistantRevealItemText(currentAssistantRevealBaseText, currentAssistantRevealSegmentText.slice(0, revealCount));
   if (ratio >= 1) {
-    clearAssistantRevealTimer();
+    clearAssistantRevealTimer(false);
   }
 }
 
@@ -463,7 +494,12 @@ function startAssistantSpeechReveal(reqId, text, audioEl = null) {
   clearAssistantRevealTimer();
   assistantSpeechStartedThisTurn = true;
   currentAssistantRevealReqId = reqId || null;
-  currentAssistantRevealBaseText = currentAssistantText || '';
+  if (reqId) {
+    finishedAssistantRevealReqIds.delete(reqId);
+  }
+  currentAssistantRevealBaseText = currentAssistantText && currentAssistantText.length > currentAssistantCommittedText.length
+    ? currentAssistantText
+    : (currentAssistantCommittedText || currentAssistantText || '');
   currentAssistantRevealSegmentText = cleanText;
   currentAssistantRevealStartedAt = performance.now();
   currentAssistantRevealAudioEl = audioEl;
@@ -474,14 +510,27 @@ function startAssistantSpeechReveal(reqId, text, audioEl = null) {
 }
 
 function finishAssistantSpeechReveal(reqId = null, fallbackText = '') {
+  if (reqId && finishedAssistantRevealReqIds.has(reqId)) {
+    return;
+  }
   if (reqId && currentAssistantRevealReqId && reqId !== currentAssistantRevealReqId) {
     return;
   }
-  const finalText = currentAssistantRevealSegmentText || (fallbackText || '').replace(/[\*#`~]+/g, '').trim();
+  const normalizedFallbackText = (fallbackText || '').replace(/[\*#`~]+/g, '').trim();
+  const baseText = currentAssistantRevealReqId
+    ? (currentAssistantRevealBaseText || '')
+    : (currentAssistantText && currentAssistantText.length > currentAssistantCommittedText.length
+        ? currentAssistantText
+        : (currentAssistantCommittedText || currentAssistantText || ''));
+  const finalText = currentAssistantRevealSegmentText || normalizedFallbackText;
   if (finalText) {
-    setAssistantItemText((currentAssistantRevealBaseText || '') + finalText);
+    const nextText = baseText.endsWith(finalText) ? baseText : `${baseText}${finalText}`;
+    commitAssistantItemText(nextText);
+    if (reqId) {
+      finishedAssistantRevealReqIds.add(reqId);
+    }
   } else if (pendingAssistantStreamText && !currentAssistantText) {
-    setAssistantItemText(pendingAssistantStreamText);
+    commitAssistantItemText(pendingAssistantStreamText);
   }
   clearAssistantRevealTimer();
   if (currentAssistantItem && currentAssistantItem.parentNode && !isStreaming) {
@@ -605,6 +654,8 @@ function connect() {
         assistantSpeechQueuedThisTurn = true;
         currentTtsReqId = msg.req_id;
         currentTtsText = (msg.text || '').replace(/[\*#`~]+/g, '');
+        const playbackReqId = currentTtsReqId;
+        const playbackText = currentTtsText;
         isTTSPlaying = true;
         syncStreamingSpeechVisuals(false);
         
@@ -625,7 +676,7 @@ function connect() {
         
         ttsAudioEl.onplaying = () => {
             syncStreamingSpeechVisuals(true);
-            startAssistantSpeechReveal(currentTtsReqId, currentTtsText, ttsAudioEl);
+            startAssistantSpeechReveal(playbackReqId, playbackText, ttsAudioEl);
         };
         
         ttsAudioEl.onwaiting = () => {
@@ -639,21 +690,20 @@ function connect() {
         };
         
         ttsAudioEl.onended = () => {
-            finishAssistantSpeechReveal(currentTtsReqId, currentTtsText);
+            finishAssistantSpeechReveal(playbackReqId, playbackText);
             syncStreamingSpeechVisuals(false);
             isTTSPlaying = false;
             ttsPlaybackStarted = false;
             ttsStreamEnded = false;
             ttsPendingBytes = 0;
-            const cb = pendingTtsCallbacks.get(currentTtsReqId);
-            if (pendingTtsCallbacks.has(currentTtsReqId)) {
-                pendingTtsCallbacks.delete(currentTtsReqId);
+            const cb = pendingTtsCallbacks.get(playbackReqId);
+            if (pendingTtsCallbacks.has(playbackReqId)) {
+                pendingTtsCallbacks.delete(playbackReqId);
             }
             if (cb) cb();
             
-            // 通知后端播放结束
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'TTS_PLAYED', req_id: currentTtsReqId }));
+                ws.send(JSON.stringify({ type: 'TTS_PLAYED', req_id: playbackReqId }));
             }
         };
         
@@ -750,7 +800,6 @@ function connect() {
           chatList.appendChild(item);
           pendingUserItem = item;
         }
-        chatPanel.scrollTop = chatPanel.scrollHeight;
       } else if (msg.type === 'USER_INPUT_REVOKE') {
         resetTurnState();
       } else if (msg.type === 'USER_INPUT_CONFIRM' && msg.text) {
@@ -760,7 +809,6 @@ function connect() {
           pendingUserItem.className = 'msg user';
           setMsgContent(pendingUserItem, msg.text);
           pendingUserItem = null;
-          chatPanel.scrollTop = chatPanel.scrollHeight;
         } else {
           appendMsg('user', msg.text);
         }
@@ -768,12 +816,11 @@ function connect() {
         releaseAssistantTurnContext();
         turnLocked = true;
         if (pendingUserItem) {
-          pendingUserItem.className = 'msg user';
+          pendingUserItem.classList.remove('pending');
           setMsgContent(pendingUserItem, msg.text || "");
           pendingUserItem = null;
-          chatPanel.scrollTop = chatPanel.scrollHeight;
-        } else if (msg.text) {
-          appendMsg('user', msg.text);
+        } else {
+          appendMsg('user', msg.text || "");
         }
       } else if (msg.type === 'CHAT_START' && msg.role === 'assistant') {
         isInterrupted = false; // 新的回复开始，重置打断标记
@@ -787,7 +834,7 @@ function connect() {
       } else if (msg.type === 'STREAM_END') {
         isStreaming = false; // 标记流式接收结束
         if (!assistantSpeechStartedThisTurn && !assistantSpeechQueuedThisTurn && pendingAssistantStreamText) {
-          setAssistantItemText(pendingAssistantStreamText);
+          commitAssistantItemText(pendingAssistantStreamText);
         }
         finishAssistantTurn();
         if (ttsQueue.length > 0) {

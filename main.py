@@ -182,6 +182,7 @@ class TrayApp(QApplication):
         self.close_after_answer = False
         self.single_turn_close_pending = False
         self.single_turn_close_requested_ts = 0.0
+        self.single_turn_close_ready_ts = 0.0
         self.last_wake_wallclock = ""
         self.last_session_start_ts = 0.0
         self.last_speaking_start_ts = 0.0
@@ -792,8 +793,9 @@ class TrayApp(QApplication):
         self._awaiting_tts_start = False
         self.force_exit_watch_started_ts = 0.0
         if self._should_close_after_answer():
-            self._on_log("回答后等待TTS启动超时，当前为单轮会话，立即退出数字人")
-            QTimer.singleShot(0, self._try_close_player_after_answer)
+            self._arm_single_turn_close_delay(2.0)
+            self._on_log("回答后等待TTS启动超时，当前为单轮会话，2秒后退出数字人")
+            QTimer.singleShot(2000, self._try_close_player_after_answer)
             return
         self._on_log("回答后等待TTS启动超时，转为空闲计时")
         self._to_chat_idle_mode("等待TTS启动超时")
@@ -864,8 +866,9 @@ class TrayApp(QApplication):
         except Exception:
             pass
         if self._should_close_after_answer():
-            self._on_log("回答播报完成，准备立即退出数字人")
-            QTimer.singleShot(120, self._try_close_player_after_answer)
+            self._arm_single_turn_close_delay(2.0)
+            self._on_log("回答播报完成，停留2秒后退出数字人")
+            QTimer.singleShot(2000, self._try_close_player_after_answer)
             return
         if keep_rule5_stage:
             self._on_log("规则九: 语音播放完成，保持规则五阶段计时")
@@ -878,6 +881,16 @@ class TrayApp(QApplication):
             return
         if self.awaiting_response or self.is_speaking or self._awaiting_tts_start:
             QTimer.singleShot(120, self._try_close_player_after_answer)
+            return
+        ready_ts = float(self.single_turn_close_ready_ts or 0.0)
+        now_ts = time.monotonic()
+        if ready_ts <= 0.0:
+            self._arm_single_turn_close_delay(2.0)
+            QTimer.singleShot(2000, self._try_close_player_after_answer)
+            return
+        if now_ts < ready_ts:
+            wait_ms = max(120, int((ready_ts - now_ts) * 1000))
+            QTimer.singleShot(wait_ms, self._try_close_player_after_answer)
             return
         pending_tts = False
         pending_playback_events = 0
@@ -896,7 +909,8 @@ class TrayApp(QApplication):
         try:
             if self.single_turn_close_requested_ts > 0:
                 elapsed = time.monotonic() - float(self.single_turn_close_requested_ts)
-                force_close = elapsed >= 2.5
+                force_close = elapsed >= 60  
+
         except Exception:
             elapsed = 0.0
             force_close = False
@@ -911,7 +925,7 @@ class TrayApp(QApplication):
         self._set_single_turn_close_pending(False)
         if not self.player_active:
             return
-        self._on_log("回答已结束，立即退出数字人")
+        self._on_log("回答已结束，开始退出数字人")
         try:
             self.close_player_signal.emit()
         except Exception:
@@ -999,8 +1013,6 @@ class TrayApp(QApplication):
         if not normalized:
             return False
         return normalized in {"你好请讲", "您好请讲"}
-
- 
     def _should_suppress_short_ack(self) -> bool:
         if not self._in_wake_grace():
             return False
@@ -1578,6 +1590,14 @@ class TrayApp(QApplication):
                 self.single_turn_close_requested_ts = time.monotonic()
         else:
             self.single_turn_close_requested_ts = 0.0
+            self.single_turn_close_ready_ts = 0.0
+
+    def _arm_single_turn_close_delay(self, delay_seconds: float = 1.0):
+        if not self._should_close_after_answer():
+            self.single_turn_close_ready_ts = 0.0
+            return
+        ready_ts = time.monotonic() + max(0.0, float(delay_seconds))
+        self.single_turn_close_ready_ts = max(float(self.single_turn_close_ready_ts or 0.0), ready_ts)
 
     def _should_close_after_answer(self) -> bool:
         return bool(self.close_after_answer or self.single_turn_close_pending)
@@ -1701,7 +1721,8 @@ class TrayApp(QApplication):
         if self.is_speaking:
             return
         if self._should_close_after_answer():
-            QTimer.singleShot(0, self._try_close_player_after_answer)
+            self._arm_single_turn_close_delay(2.0)
+            QTimer.singleShot(2000, self._try_close_player_after_answer)
             return
         if (not self.ws_clients) and (not self.player_active):
             return
@@ -1958,7 +1979,7 @@ class TrayApp(QApplication):
         self.http_thread.start()
 
     def _get_aliyun_tts_api_key(self) -> str:
-        default_asr_key = "sk-28313ea70a8f47d09a6cd1cab51c477e"
+        default_asr_key = "sk-3b0b4ca3a53a4cf489a5a294eda0aff0"
         api_key = (self.secrets.get("asr_api_key", self.cfg.get("aliyun_appkey", default_asr_key)) or "").strip()
         if not api_key:
             api_key = default_asr_key

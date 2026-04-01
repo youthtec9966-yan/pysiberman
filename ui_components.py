@@ -169,16 +169,16 @@ class SettingsDialog(QDialog):
         w.setLayout(row)
 
         # 定义 LLM 输入框
-        self.llm_base_url = QLineEdit(self.cfg.get("llm_base_url", "https://api.deepseek.com/v1"))
-        self.llm_api_key = QLineEdit(self.secrets.get("llm_api_key", "sk-8394fdbc7380424eab4633fed976a6fe"))
+        self.llm_base_url = QLineEdit(self.cfg.get("llm_base_url", "https://ark.cn-beijing.volces.com/api/v3"))
+        self.llm_api_key = QLineEdit(self.secrets.get("llm_api_key", "43bdf90d-590e-442e-8f68-5207a88d3052"))
         self.llm_api_key.setEchoMode(QLineEdit.Password)
-        self.asr_api_key = QLineEdit(self.secrets.get("asr_api_key", self.cfg.get("aliyun_appkey", "sk-28313ea70a8f47d09a6cd1cab51c477e")))
+        self.asr_api_key = QLineEdit(self.secrets.get("asr_api_key", self.cfg.get("aliyun_appkey", "sk-3b0b4ca3a53a4cf489a5a294eda0aff0")))
         self.asr_api_key.setEchoMode(QLineEdit.Password)
         self.porcupine_access_key = QLineEdit(self.secrets.get("porcupine_access_key", self.cfg.get("porcupine_access_key", "")))
         self.porcupine_access_key.setEchoMode(QLineEdit.Password)
         self.kws_enabled = QCheckBox("启用 Porcupine KWS 唤醒")
         self.kws_enabled.setChecked(bool(self.cfg.get("kws_enabled", False)))
-        self.llm_model = QLineEdit(self.cfg.get("llm_model", "deepseek-chat"))
+        self.llm_model = QLineEdit(self.cfg.get("llm_model", "doubao-seed-1-6-flash-250828"))
         self.tts_model = QComboBox()
         self.tts_model.setEditable(True)
         for name in ["cosyvoice-v3-flash", "cosyvoice-v1"]:
