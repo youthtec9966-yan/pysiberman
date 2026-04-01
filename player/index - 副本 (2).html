@@ -241,6 +241,7 @@ caption.anchor.set(0.1, -10);
 caption.x = Math.max(0, app.renderer.width - getChatWidth()) / 2;
 caption.y = 30;
 app.stage.addChild(caption);
+let fadeTimer = null;
 
 /** 
  * 
@@ -568,9 +569,7 @@ async function ensureFullscreen() {
  * 并处理断线重连
  */
 function connect() {
-  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsHost = window.location.hostname || '127.0.0.1';
-  ws = new WebSocket(`${wsScheme}://${wsHost}:3399/`);
+  ws = new WebSocket('ws://localhost:3399/');
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
@@ -582,7 +581,7 @@ function connect() {
       if (msg.type === 'MODEL_CHANGE' && (msg.url || msg.path)) {
         load(msg.url || msg.path);
       } else if (msg.type === 'STOP_GENERATION') {
-        interrupt(false);
+        interrupt();
       } else if (msg.type === 'ACTION') {
         if (model) {
           const s = model.internalModel.settings;
@@ -842,17 +841,41 @@ window.addEventListener('keydown', (e) => {
     }
   }
 });
+let recognition;
+let listening = false;
+const WAKE_KEYWORDS = ["小石警官"];
+
+let keepAliveTimer;          // 空文本喂麦定时器
 let talking = false;
 let talkingTimer = null;
+let ttsSpeaking = false;
+let ttsText = '';
 const mouthShapes = { Silence: { open: 0, form: 0 }, A: { open: 1.0, form: 0.0 }, I: { open: 0.0, form: 1.0 }, U: { open: 0.49, form: -1.0 }, E: { open: 0.63, form: 0.83 }, O: { open: 1.0, form: 0.04 } };
 let mouthShape = mouthShapes.Silence;
+
+/**
+ * 文本标准化处理
+ * 主要用于修正语音识别的唤醒词（如把“小时”“消失”纠正为“小石”）
+ */
+function _normalize(s) {
+  let t = (s || "").replace(/[\s,.!?;:，。！？；：、（）()《》〈〉「」『』“”‘’—…·\-]+/g, "");
+  const xiaoShiReplacements = ["小时","消失","小是","小识","小事","肖石","晓石","晓诗","萧石"];
+  for (const v of xiaoShiReplacements) {
+    t = t.split(v).join("小石");
+  }
+  const jingGuanReplacements = ["景观","尽管","警管","井关","金冠","尽关","经管"];
+  for (const v of jingGuanReplacements) {
+    t = t.split(v).join("警官");
+  }
+  return t;
+}
 
 let isInterrupted = false;
 
 /**
  * 打断当前的 TTS 和动作，并回复
  */
-function interrupt(notifyBackend = true) {
+function interrupt() {
     console.log("Interrupting...");
 
     ttsQueue = [];
@@ -875,7 +898,7 @@ function interrupt(notifyBackend = true) {
     stopTalkingMotions();
     
     // 4. 通知后端停止生成
-    if (notifyBackend && ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'STOP_GENERATION' }));
     }
     
@@ -885,10 +908,220 @@ function interrupt(notifyBackend = true) {
 }
 
 /**
+ * 初始化语音识别对象 (SpeechRecognition)
+ * 配置语言、连续识别模式，并绑定结果处理回调
+ */
+function ensureSR(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  if (!recognition){
+    recognition = new SR();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.onresult = (e) => {
+      const r = e.results[e.results.length-1];
+      if (r && r[0] && r[0].transcript) {
+        const text = r[0].transcript;
+        // showText(text); // Debug: show raw text
+        
+        // 3. 环境噪音阈值检查 (VAD)
+        if (!wasLoudEnough()) {
+             console.log("Ignored quiet noise (VAD)");
+             return;
+        }
+
+        const clean = _normalize(text);
+        
+        // 仅保留明确停止词，避免误打断
+        const INTERRUPT_KEYWORDS = ["停", "停下", "别说", "闭嘴", "安静", "打断", "不听"];
+        
+        const hasWakeWord = WAKE_KEYWORDS.some(k => clean.includes(k));
+        const hasInterruptWord = INTERRUPT_KEYWORDS.some(k => clean.includes(k));
+
+        // 如果正在说话或正在生成回答，仅响应唤醒词或打断词进行打断
+        // 注意：这里的 isStreaming 标志着后端正在流式返回结果，但 TTS 还没开始播放
+        if (turnLocked || isTTSPlaying || isStreaming) {
+            if (hasWakeWord || hasInterruptWord) {
+                interrupt();
+            } else {
+                console.log("Ignored during single-turn lock:", text);
+            }
+            return;
+        }
+        
+        // 4. 短语过滤 (语气词/短词过滤)
+        // 如果文本长度小于 5 个字，且不包含唤醒词或打断词，则认为是语气词或无效输入，直接忽略
+        // 注意：虽然打断逻辑主要在上方 isTTSPlaying 处理，但在静音时如果用户说“再见”或“小石”等词，
+        // 我们也希望保留（交给 LLM 处理），而不是直接过滤掉。
+        if (clean.length < 5 && !hasWakeWord && !hasInterruptWord) {
+             const logMsg = `[Filter] Ignored short text (<5 chars): "${clean}"`;
+             console.log(logMsg);
+             if (ws && ws.readyState === WebSocket.OPEN) {
+                 ws.send(JSON.stringify({ type: 'LOG', text: logMsg }));
+             }
+             return;
+        }
+        
+        // 如果没在说话，直接处理对话
+        showText(text);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          turnLocked = true;
+          ws.send(JSON.stringify({ type: 'ASR_RESULT', text }));
+        }
+      }
+    };
+    recognition.onend = () => {
+      listening = false;
+      // 超时或任何原因结束都立即重启，保持长驻监听
+      // 除非正在进行语音合成(TTS)
+      if (recognition && !isTTSPlaying) {
+        recognition.start();
+        listening = true;
+      }
+    };
+    recognition.onstart = () => {
+      listening = true;
+    };
+    recognition.onerror = () => {
+      listening = false;
+      setTimeout(startASR, 1000);
+    };
+  }
+  return recognition;
+}
+
+let audioContext;
+let analyser;
+let microphone;
+let dataArray;
+let isNoise = true;
+let speechStartTime = 0;
+
+// 自适应噪音阈值相关变量
+let noiseFloor = 5; // 初始噪音底噪估计值
+let minVolHistory = []; // 记录最近几秒的最低音量
+let tempMinVol = 255;
+let frameCount = 0;
+const NOISE_MARGIN = 3; // 动态阈值 = noiseFloor + NOISE_MARGIN
+
+function updateNoiseFloor(vol) {
+    tempMinVol = Math.min(tempMinVol, vol);
+    frameCount++;
+    
+    // 每 60 帧 (约 1 秒) 更新一次历史记录
+    if (frameCount >= 60) { 
+        minVolHistory.push(tempMinVol);
+        if (minVolHistory.length > 5) minVolHistory.shift(); // 保持最近 5 秒
+        
+        // 更新底噪：取最近 5 秒内最低音量的平均值或最小值
+        // 这里取最小值，保证底噪估计偏保守，避免切掉小声说话
+        if (minVolHistory.length > 0) {
+             noiseFloor = Math.min(...minVolHistory);
+             const logMsg = `[VAD] Noise Floor Updated: ${noiseFloor.toFixed(2)} | Threshold: ${(noiseFloor + NOISE_MARGIN).toFixed(2)}`;
+             console.log(logMsg);
+             if (ws && ws.readyState === WebSocket.OPEN) {
+                 ws.send(JSON.stringify({ type: 'LOG', text: logMsg }));
+             }
+        }
+        
+        tempMinVol = 255; // 重置当前秒最小值
+        frameCount = 0;
+    }
+    
+    // 快速初始化：如果还没积累足够历史，直接跟随当前音量（如果是静音环境）
+    if (minVolHistory.length === 0) {
+        // 使用简单的低通滤波快速逼近
+        if (vol < noiseFloor) noiseFloor = vol;
+        else noiseFloor = noiseFloor * 0.95 + vol * 0.05;
+    }
+    
+    return noiseFloor;
+}
+
+const SPEECH_MIN_DURATION = 300; // Minimum duration of loud sound to be considered speech (ms)
+
+async function setupAudioMonitor(stream) {
+    try {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+        }
+        if (microphone) {
+             microphone.disconnect();
+        }
+        microphone = audioContext.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+        
+        monitorVolume();
+    } catch(e) { console.error("Audio monitor setup failed:", e); }
+}
+
+function monitorVolume() {
+    if (!analyser) return;
+    
+    requestAnimationFrame(monitorVolume);
+    analyser.getByteTimeDomainData(dataArray);
+
+    let sum = 0;
+    for(let i = 0; i < dataArray.length; i++) {
+        sum += Math.abs(dataArray[i] - 128);
+    }
+    const average = sum / dataArray.length;
+    // console.log("Vol:", average); // Debug volume
+
+    // 更新自适应底噪
+    updateNoiseFloor(average);
+    const dynamicThreshold = noiseFloor + NOISE_MARGIN;
+    
+    // 将当前阈值存入历史，以便 wasLoudEnough 检查时使用对应时刻的阈值
+    // 或者简单点，wasLoudEnough 使用最新的 dynamicThreshold 也可以，误差不大
+
+    if (average > dynamicThreshold) {
+        if (isNoise) {
+            speechStartTime = performance.now();
+            isNoise = false;
+        }
+    } else {
+        // Reset if silence persists for a bit (debounce)? 
+        // For simplicity, just mark as noise if it drops. 
+        // But ASR result comes *after* speech, so we need to know if there WAS loud speech recently.
+    }
+    
+    // Logic: Keep track of "max volume in last 2 seconds"
+    updateVolumeHistory(average, dynamicThreshold);
+}
+
+const volumeHistory = [];
+function updateVolumeHistory(vol, threshold) {
+    const now = performance.now();
+    volumeHistory.push({ t: now, v: vol, th: threshold });
+    // Keep last 2 seconds
+    while(volumeHistory.length > 0 && volumeHistory[0].t < now - 2000) {
+        volumeHistory.shift();
+    }
+}
+
+function wasLoudEnough() {
+    // Check if any volume sample in history exceeded its threshold
+    return volumeHistory.some(h => h.v > h.th);
+}
+
+/**
  * 仅启动音频监控 (用于可视化)，不进行语音识别
  */
 async function startAudioMonitorOnly() {
     console.log("Audio monitor (visualization) disabled to prevent microphone permission prompt.");
+    /*
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setupAudioMonitor(stream);
+    } catch(e) {
+        console.error("Audio monitor setup failed:", e);
+    }
+    */
 }
 
 /**
@@ -902,6 +1135,25 @@ async function startASR(){
     ws.send(JSON.stringify({ type: 'ASR_START_LOCAL' }));
   }
     
+  
+  // Audio monitor disabled to prevent microphone permission prompt
+  // Backend now handles ASR and audio capture
+  /*
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setupAudioMonitor(stream);
+  } catch(e) {
+    console.error("Audio monitor failed:", e);
+  }
+  */
+}
+
+/**
+ * 停止语音识别
+ */
+function stopASR(){
+  console.log("Browser ASR stopped (logical only).");
+  // Backend ASR is managed by backend state
 }
 let lipRaf = null;
 let lipPulse = 0;
@@ -935,6 +1187,16 @@ function setMouthForm(v){
 }
 
 /**
+ * 触发一次口型脉冲
+ * 用于模拟说话时的嘴巴开合节奏
+ */
+function triggerLipPulse(){
+  const now = performance.now();
+  lipPulse = 1;
+  lipPulseUntil = now + 80;
+}
+
+/**
  * 根据字符选择对应的元音嘴型
  * (A, I, U, E, O, Silence)
  */
@@ -950,6 +1212,16 @@ function pickMouthShape(ch){
   if (r < 0.4) return mouthShapes.E;
   if (r < 0.75) return mouthShapes.O;
   return mouthShapes.U;
+}
+
+/**
+ * 根据 TTS 朗读到的字符索引更新嘴型
+ */
+function updateMouthShapeFromIndex(text, idx){
+  let ch = '';
+  try { if (typeof idx === 'number' && idx >= 0 && idx < String(text||'').length) ch = String(text||'')[idx] || ''; } catch {}
+  const s = pickMouthShape(ch);
+  if (s) mouthShape = s;
 }
 
 /**
@@ -975,6 +1247,8 @@ function lipStep(now){
  * 在 TTS 开始时调用
  */
 function startLip(text, rate){
+  ttsSpeaking = true;
+  ttsText = String(text||'');
   mouthVal = 0;
   lipNextAt = performance.now() + 90;
   lipCharMs = Math.max(60, 160 / Math.max(0.5, rate || 1));
@@ -986,6 +1260,7 @@ function startLip(text, rate){
  * 在 TTS 结束时调用
  */
 function stopLip(){
+  ttsSpeaking = false;
   try { if (lipRaf) cancelAnimationFrame(lipRaf); } catch(e){}
   lipRaf = null;
   mouthVal = 0;

@@ -966,6 +966,7 @@ class TrayApp(QApplication):
             return False
         return normalized in {"你好请讲", "您好请讲"}
 
+ 
     def _should_suppress_short_ack(self) -> bool:
         if not self._in_wake_grace():
             return False
@@ -1436,9 +1437,14 @@ class TrayApp(QApplication):
             return
 
         if not self.ws_clients:
+            if self._is_frontend_reconnect_window():
+                self._on_log("Warn: Chat input received while frontend reconnecting. Ignore this turn and wait for reconnect.")
+                if self.worker:
+                    self._to_chat_idle_mode("前端重连窗口内忽略输入")
+                return
             self._on_log("Warn: Chat input received but no clients connected. Switching back to wake mode.")
             if self.worker:
-                self.worker.set_mode("wake")
+                self._to_wake_mode("无前端连接收到对话输入")
             return
 
         clean_text = "".join(c for c in text if c.isalnum() or '\u4e00' <= c <= '\u9fff')
@@ -1516,6 +1522,16 @@ class TrayApp(QApplication):
         if self.last_wake_ts <= 0:
             return False
         return (time.monotonic() - self.last_wake_ts) <= float(self.wake_grace_seconds)
+
+    def _is_frontend_reconnect_window(self) -> bool:
+        if self.ws_clients:
+            return False
+        if not self.player_active:
+            return False
+        started_ts = float(self.player_launch_started_ts or 0.0)
+        if started_ts <= 0:
+            return False
+        return (time.monotonic() - started_ts) <= float(self.player_connect_timeout_seconds)
 
     def _set_single_turn_close_pending(self, enabled: bool):
         enabled = bool(enabled)
@@ -2228,89 +2244,93 @@ class TrayApp(QApplication):
                     "text": intro_msg,
                 }))
                 self._mark_successful_response(intro_msg)
-            async for message in websocket:
-                try:
-                    data = json.loads(message)
+            try:
+                async for message in websocket:
                     try:
-                        self._file_log("ws recv: " + str(data.get("type")))
-                    except Exception:
-                        pass
-                    if data.get("type") == "ASR_RESULT" and data.get("text"):
+                        data = json.loads(message)
                         try:
-                            self.ws_broadcast({"type": "ASR_TEXT", "text": data["text"]})
+                            self._file_log("ws recv: " + str(data.get("type")))
                         except Exception:
                             pass
-                        try:
-                            self._on_external_asr_text(data["text"])
-                        except Exception:
-                            pass
-                        try:
-                            QTimer.singleShot(0, lambda t=data["text"]: self.handle_backend_asr(t))
-                        except Exception:
-                            pass
-                    elif data.get("type") == "ASR_START_LOCAL":
-                        try:
-                            self.start_listening_signal.emit()
-                            self.ensure_chat_mode_signal.emit()
-                        except Exception as e:
-                            self._on_error(str(e))
-                    elif data.get("type") == "ASR_STOP_LOCAL":
-                        try:
-                            self.stop_listening_signal.emit()
-                        except Exception:
-                            pass
-                    elif data.get("type") == "CLOSE_PLAYER":
-                        self._on_log("收到前端关闭信号 (CLOSE_PLAYER)")
-                        try:
-                            self.close_player_signal.emit()
-                        except Exception as e:
-                            self._on_error(f"触发关闭失败: {e}")
-                    elif data.get("type") == "STOP_GENERATION":
-                        self._on_log("收到打断信号，停止生成")
-                        try:
-                            QTimer.singleShot(0, lambda: self.handle_audio_interrupt_command("frontend"))
-                        except Exception:
-                            self.handle_audio_interrupt_command("frontend")
-                    elif data.get("type") == "LOG":
-                        # 处理前端发来的日志消息
-                        log_text = data.get("text", "")
-                        if log_text:
-                            self._on_log(f"前端日志: {log_text}")
-                    elif data.get("type") == "TTS_START":
-                        self.tts_start_signal.emit()
-                    elif data.get("type") == "TTS_END":
-                        self.tts_end_signal.emit()
-                    elif data.get("type") == "TTS_PLAYED":
-                        req_id = data.get("req_id")
-                        with self.tts_lock:
-                             if req_id in self.tts_played_events:
-                                self.tts_played_events[req_id].set()
-                    elif data.get("type") == "TTS_SYNTH":
-                        req_id = data.get("req_id")
-                        tts_text = data.get("text", "")
-                        with self.tts_order_cond:
-                            self.tts_submit_index += 1
-                            order_index = self.tts_submit_index
-                        cancel_seq = int(getattr(self, "tts_cancel_seq", 0) or 0)
-                        asyncio.create_task(asyncio.to_thread(self._handle_tts_request, order_index, req_id, tts_text, cancel_seq))
-                except Exception as e:
-                    self._on_error(f"Error processing ws message: {e}")
+                        if data.get("type") == "ASR_RESULT" and data.get("text"):
+                            try:
+                                self.ws_broadcast({"type": "ASR_TEXT", "text": data["text"]})
+                            except Exception:
+                                pass
+                            try:
+                                self._on_external_asr_text(data["text"])
+                            except Exception:
+                                pass
+                            try:
+                                QTimer.singleShot(0, lambda t=data["text"]: self.handle_backend_asr(t))
+                            except Exception:
+                                pass
+                        elif data.get("type") == "ASR_START_LOCAL":
+                            try:
+                                self.start_listening_signal.emit()
+                                self.ensure_chat_mode_signal.emit()
+                            except Exception as e:
+                                self._on_error(str(e))
+                        elif data.get("type") == "ASR_STOP_LOCAL":
+                            try:
+                                self.stop_listening_signal.emit()
+                            except Exception:
+                                pass
+                        elif data.get("type") == "CLOSE_PLAYER":
+                            self._on_log("收到前端关闭信号 (CLOSE_PLAYER)")
+                            try:
+                                self.close_player_signal.emit()
+                            except Exception as e:
+                                self._on_error(f"触发关闭失败: {e}")
+                        elif data.get("type") == "STOP_GENERATION":
+                            self._on_log("收到打断信号，停止生成")
+                            try:
+                                QTimer.singleShot(0, lambda: self.handle_audio_interrupt_command("frontend"))
+                            except Exception:
+                                self.handle_audio_interrupt_command("frontend")
+                        elif data.get("type") == "LOG":
+                            log_text = data.get("text", "")
+                            if log_text:
+                                self._on_log(f"前端日志: {log_text}")
+                        elif data.get("type") == "TTS_START":
+                            self.tts_start_signal.emit()
+                        elif data.get("type") == "TTS_END":
+                            self.tts_end_signal.emit()
+                        elif data.get("type") == "TTS_PLAYED":
+                            req_id = data.get("req_id")
+                            with self.tts_lock:
+                                 if req_id in self.tts_played_events:
+                                    self.tts_played_events[req_id].set()
+                        elif data.get("type") == "TTS_SYNTH":
+                            req_id = data.get("req_id")
+                            tts_text = data.get("text", "")
+                            with self.tts_order_cond:
+                                self.tts_submit_index += 1
+                                order_index = self.tts_submit_index
+                            cancel_seq = int(getattr(self, "tts_cancel_seq", 0) or 0)
+                            asyncio.create_task(asyncio.to_thread(self._handle_tts_request, order_index, req_id, tts_text, cancel_seq))
+                    except Exception as e:
+                        self._on_error(f"Error processing ws message: {e}")
+            except Exception as e:
+                self._on_log(f"前端连接循环结束: {e}")
         finally:
             try:
                 self.ws_clients.remove(websocket)
             except Exception:
                 pass
             
-            # 如果所有客户端都断开，自动切换回唤醒模式
+            # 如果所有客户端都断开，进入“等待重连”或回到唤醒模式
             if not self.ws_clients:
                 if self.player_active:
                     self.player_launch_started_ts = time.monotonic()
                     self._on_log("前端连接已断开，等待页面重连")
+                    if self.worker:
+                        self._to_chat_idle_mode("前端断开等待重连")
                 else:
                     self.player_launch_started_ts = 0.0
-                self._on_log("All clients disconnected, switching to wake mode")
-                if self.worker:
-                    self._to_wake_mode("前端断开")
+                    self._on_log("All clients disconnected, switching to wake mode")
+                    if self.worker:
+                        self._to_wake_mode("前端断开")
                 
                 try:
                     self.window_manager.restore_context()
