@@ -367,6 +367,7 @@ let currentAssistantRevealAudioEl = null;
 let pendingAssistantStreamText = '';
 let assistantSpeechStartedThisTurn = false;
 let assistantSpeechQueuedThisTurn = false;
+let assistantAutoScrollEnabled = true;
 
 function clearAssistantRevealTimer() {
   if (currentAssistantRevealTimer) {
@@ -387,6 +388,7 @@ function releaseAssistantTurnContext() {
   pendingAssistantStreamText = '';
   assistantSpeechStartedThisTurn = false;
   assistantSpeechQueuedThisTurn = false;
+  assistantAutoScrollEnabled = true;
 }
 
 function ensureAssistantItem() {
@@ -400,6 +402,7 @@ function ensureAssistantItem() {
   chatPanel.scrollTop = chatPanel.scrollHeight;
   currentAssistantItem = item;
   currentAssistantText = '';
+  assistantAutoScrollEnabled = true;
   return item;
 }
 
@@ -407,6 +410,15 @@ function setAssistantItemText(text) {
   const item = ensureAssistantItem();
   currentAssistantText = text || '';
   setMsgContent(item, currentAssistantText);
+  if (!assistantAutoScrollEnabled) {
+    return;
+  }
+  const panelHeight = chatPanel.clientHeight || 0;
+  const itemHeight = item.offsetHeight || 0;
+  if (panelHeight > 0 && itemHeight > panelHeight * 0.9) {
+    assistantAutoScrollEnabled = false;
+    return;
+  }
   chatPanel.scrollTop = chatPanel.scrollHeight;
 }
 
