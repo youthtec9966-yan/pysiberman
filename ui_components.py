@@ -289,6 +289,12 @@ class SettingsDialog(QDialog):
         self.interrupt_audio_standby_rms_gate.setDecimals(4)
         self.interrupt_audio_standby_rms_gate.setValue(float(self.cfg.get("interrupt_audio_standby_rms_gate", 0.006)))
         form.addRow("打断待机RMS门限", self.interrupt_audio_standby_rms_gate)
+        self.asr_interrupt_enabled = QCheckBox("启用 ASR 打断")
+        self.asr_interrupt_enabled.setChecked(bool(self.cfg.get("asr_interrupt_enabled", False)))
+        form.addRow("ASR打断", self.asr_interrupt_enabled)
+        self.audio_command_interrupt_enabled = QCheckBox("启用音频指令打断")
+        self.audio_command_interrupt_enabled.setChecked(bool(self.cfg.get("audio_command_interrupt_enabled", False)))
+        form.addRow("音频指令打断", self.audio_command_interrupt_enabled)
         self.asr_profile_mode = QComboBox()
         self.asr_profile_mode.addItem("智能（推荐）", "smart")
         self.asr_profile_mode.addItem("安静环境（更灵敏）", "sensitive")
@@ -311,6 +317,8 @@ class SettingsDialog(QDialog):
         self.interrupt_audio_check_interval_frames.valueChanged.connect(self._on_interrupt_config_changed)
         self.interrupt_audio_cooldown_ms.valueChanged.connect(self._on_interrupt_config_changed)
         self.interrupt_audio_standby_rms_gate.valueChanged.connect(self._on_interrupt_config_changed)
+        self.asr_interrupt_enabled.toggled.connect(self._on_interrupt_feature_flags_changed)
+        self.audio_command_interrupt_enabled.toggled.connect(self._on_interrupt_feature_flags_changed)
         self.kws_enabled.toggled.connect(self._update_kws_controls)
         self._update_kws_controls(self.kws_enabled.isChecked())
         self._on_profile_mode_changed(self.asr_profile_mode.currentIndex())
@@ -388,6 +396,8 @@ class SettingsDialog(QDialog):
         self.cfg.set("interrupt_audio_check_interval_frames", int(self.interrupt_audio_check_interval_frames.value()))
         self.cfg.set("interrupt_audio_cooldown_ms", int(self.interrupt_audio_cooldown_ms.value()))
         self.cfg.set("interrupt_audio_standby_rms_gate", float(self.interrupt_audio_standby_rms_gate.value()))
+        self.cfg.set("asr_interrupt_enabled", bool(self.asr_interrupt_enabled.isChecked()))
+        self.cfg.set("audio_command_interrupt_enabled", bool(self.audio_command_interrupt_enabled.isChecked()))
         self.cfg.set("asr_profile_mode", self.asr_profile_mode.currentData())
         profile = self._current_profile()
         self.cfg.set("asr_standby_noise_margin", profile["standby_noise_margin"])
@@ -428,6 +438,17 @@ class SettingsDialog(QDialog):
             return
         try:
             self.app._on_settings_interrupt_config_changed(self._interrupt_runtime_config())
+        except Exception:
+            pass
+
+    def _on_interrupt_feature_flags_changed(self, _):
+        if not self.app:
+            return
+        try:
+            self.app._on_settings_interrupt_feature_flags_changed(
+                bool(self.asr_interrupt_enabled.isChecked()),
+                bool(self.audio_command_interrupt_enabled.isChecked())
+            )
         except Exception:
             pass
 

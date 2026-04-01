@@ -85,6 +85,9 @@ class AudioWakeWorkerASR(QObject):
         self._asr_enabled = True
         self._wake_listener_enabled = True
         self._interrupt_listener_enabled = False
+        self._interrupt_audio_enabled = True
+        self.asr_interrupt_enabled = False
+        self.audio_command_interrupt_enabled = False
         self._kws_ready = False
         self._kws_fallback_active = False
         
@@ -175,6 +178,17 @@ class AudioWakeWorkerASR(QObject):
     def set_interrupt_listener_enabled(self, enabled: bool):
         self._interrupt_listener_enabled = bool(enabled)
         self.log.emit(f"Interrupt listener enabled={self._interrupt_listener_enabled}")
+
+    def set_interrupt_audio_enabled(self, enabled: bool):
+        self._interrupt_audio_enabled = bool(enabled)
+        self.log.emit(f"Interrupt audio enabled={self._interrupt_audio_enabled}")
+
+    def set_interrupt_feature_flags(self, asr_interrupt_enabled: bool, audio_command_interrupt_enabled: bool):
+        self.asr_interrupt_enabled = bool(asr_interrupt_enabled)
+        self.audio_command_interrupt_enabled = bool(audio_command_interrupt_enabled)
+        self.log.emit(
+            f"Interrupt feature flags asr={self.asr_interrupt_enabled} audio_cmd={self.audio_command_interrupt_enabled}"
+        )
 
     def _activate_asr_wake_fallback(self, reason: str):
         self._kws_ready = False
@@ -277,6 +291,8 @@ class AudioWakeWorkerASR(QObject):
         return True
 
     def _match_interrupt_audio_command(self, pcm_window):
+        if not (self._interrupt_audio_enabled and self.audio_command_interrupt_enabled):
+            return False
         if not (self.audio_match_enabled and self.interrupt_matcher):
             return False
         if not (self._interrupt_listener_enabled or self._speaking_state):
@@ -621,7 +637,12 @@ class AudioWakeWorkerASR(QObject):
                                 silence_counter = 0
                                 interrupt_ring = []
                                 continue
-                            should_kws_interrupt = self.kws_interrupt_fallback_enabled and (self._speaking_state or self._interrupt_listener_enabled)
+                            should_kws_interrupt = (
+                                self.kws_interrupt_fallback_enabled
+                                and self.audio_command_interrupt_enabled
+                                and self._interrupt_audio_enabled
+                                and (self._speaking_state or self._interrupt_listener_enabled)
+                            )
                             if should_kws_interrupt and (now_ts - last_interrupt_ts) > kws_interrupt_cooldown_sec:
                                 self.log.emit("KWS Interrupt Fallback: hit")
                                 self.interrupt_detected.emit("kws_fallback")

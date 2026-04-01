@@ -420,6 +420,12 @@ class TrayApp(QApplication):
             "interrupt_audio_standby_rms_gate": float(self.cfg.get("interrupt_audio_standby_rms_gate", 0.006)),
         }
 
+    def _get_interrupt_feature_flags_from_config(self):
+        return {
+            "asr_interrupt_enabled": bool(self.cfg.get("asr_interrupt_enabled", False)),
+            "audio_command_interrupt_enabled": bool(self.cfg.get("audio_command_interrupt_enabled", False)),
+        }
+
     def _get_kws_config_from_config(self):
         enabled = bool(self.cfg.get("kws_enabled", False))
         raw_access_key = self.cfg.get("porcupine_access_key", "")
@@ -548,6 +554,23 @@ class TrayApp(QApplication):
             return
         self.worker.apply_dynamic_profile(self._get_asr_profile_from_config())
         self.worker.apply_interrupt_match_config(self._get_interrupt_match_config_from_config())
+        self._apply_interrupt_feature_flags_to_worker()
+
+    def _apply_interrupt_feature_flags_to_worker(self):
+        if not self.worker:
+            return
+        flags = self._get_interrupt_feature_flags_from_config()
+        try:
+            self.worker.set_interrupt_feature_flags(
+                bool(flags.get("asr_interrupt_enabled", False)),
+                bool(flags.get("audio_command_interrupt_enabled", False))
+            )
+        except Exception:
+            pass
+        try:
+            self.worker.set_interrupt_audio_enabled(bool(flags.get("audio_command_interrupt_enabled", False)))
+        except Exception:
+            pass
 
     def _reload_force_exit_guard_config(self):
         try:
@@ -596,6 +619,17 @@ class TrayApp(QApplication):
         if self.worker:
             try:
                 self.worker.apply_interrupt_match_config(cfg)
+            except Exception:
+                pass
+
+    def _on_settings_interrupt_feature_flags_changed(self, asr_interrupt_enabled: bool, audio_command_interrupt_enabled: bool):
+        if self.worker:
+            try:
+                self.worker.set_interrupt_feature_flags(bool(asr_interrupt_enabled), bool(audio_command_interrupt_enabled))
+            except Exception:
+                pass
+            try:
+                self.worker.set_interrupt_audio_enabled(bool(audio_command_interrupt_enabled))
             except Exception:
                 pass
 
@@ -1488,11 +1522,13 @@ class TrayApp(QApplication):
         has_interrupt_keyword = len(matched_keywords) > 0
         loud_interrupt_raw = (peak >= peak_threshold) and (rms >= rms_threshold)
         loud_interrupt = False
-        should_try_interrupt = self.is_speaking or self.awaiting_response
+        asr_interrupt_enabled = bool(self.cfg.get("asr_interrupt_enabled", False))
+        should_try_interrupt = (self.is_speaking or self.awaiting_response) and asr_interrupt_enabled
         self._on_log(
             "ASR托底打断判定详情: "
             f"text={text!r} clean={clean_text!r} "
             f"is_speaking={self.is_speaking} awaiting_response={self.awaiting_response} "
+            f"asr_interrupt_enabled={asr_interrupt_enabled} "
             f"should_try_interrupt={should_try_interrupt} "
             f"has_interrupt_keyword={has_interrupt_keyword} matched_keywords={matched_keywords} "
             f"peak={peak:.4f}/{peak_threshold:.4f} rms={rms:.4f}/{rms_threshold:.4f} "
