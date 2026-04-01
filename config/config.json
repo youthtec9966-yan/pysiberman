@@ -1,0 +1,13 @@
+{
+  "aliyun_appkey": "",
+  "wake_model_path": "",
+  "device_index": 0,
+  "llm_base_url": "https://api.deepseek.com/v1",
+  "llm_model": "deepseek-chat",
+  "wake_engine": "asr",
+  "oww_model_path": "小狗子",
+  "oww_threshold": 0.5,
+  "asr_wake_phrases": "小石警官",
+  "asr_model_size": "medium",
+  "asr_model_dir": ""
+}

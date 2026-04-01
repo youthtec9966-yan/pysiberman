@@ -1,0 +1,16 @@
+.venv312/
+__pycache__/
+build/
+dist/
+logs/
+output/
+*.pyc
+*.pyd
+*.pyo
+*.spec
+*.zip
+*.exe
+*.iss
+"main - 副本*.py"
+edge_kiosk_data/
+*.log

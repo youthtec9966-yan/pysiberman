@@ -1,0 +1,178 @@
+{
+	"Version": 1,
+	"Meta": {
+		"SettingCount": 1,
+		"Dictionary": [
+			{
+				"Id": "MotionSyncSetting",
+				"Name": "mouth"
+			}
+		]
+	},
+	"Settings": [
+		{
+			"Id": "MotionSyncSetting",
+			"AnalysisType": "CRI",
+			"UseCase": "Mouth",
+			"CubismParameters": [
+				{
+					"Name": "嘴 开闭",
+					"Id": "ParamMouthOpenY",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Damper": 0.0,
+					"Smooth": 25
+				},
+				{
+					"Name": "嘴 变形",
+					"Id": "ParamMouthForm",
+					"Min": -1.0,
+					"Max": 1.0,
+					"Damper": 0.0,
+					"Smooth": 25
+				}
+			],
+			"AudioParameters": [
+				{
+					"Name": "Silence",
+					"Id": "Silence",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 1.0,
+					"Enabled": true
+				},
+				{
+					"Name": "A",
+					"Id": "A",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 1.0,
+					"Enabled": true
+				},
+				{
+					"Name": "I",
+					"Id": "I",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 1.0,
+					"Enabled": true
+				},
+				{
+					"Name": "U",
+					"Id": "U",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 2.700000047683716,
+					"Enabled": true
+				},
+				{
+					"Name": "E",
+					"Id": "E",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 6.0,
+					"Enabled": true
+				},
+				{
+					"Name": "O",
+					"Id": "O",
+					"Min": 0.0,
+					"Max": 1.0,
+					"Scale": 8.0,
+					"Enabled": true
+				}
+			],
+			"Mappings": [
+				{
+					"Type": "Shape",
+					"Id": "Silence",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 0.0
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": 0.0
+						}
+					]
+				},
+				{
+					"Type": "Shape",
+					"Id": "A",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 1.0
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": 0.0
+						}
+					]
+				},
+				{
+					"Type": "Shape",
+					"Id": "I",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 0.0
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": 1.0
+						}
+					]
+				},
+				{
+					"Type": "Shape",
+					"Id": "U",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 0.49000000953674316
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": -1.0
+						}
+					]
+				},
+				{
+					"Type": "Shape",
+					"Id": "E",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 0.6299999952316284
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": 0.8299999833106995
+						}
+					]
+				},
+				{
+					"Type": "Shape",
+					"Id": "O",
+					"Targets": [
+						{
+							"Id": "ParamMouthOpenY",
+							"Value": 1.0
+						},
+						{
+							"Id": "ParamMouthForm",
+							"Value": 0.03999999910593033
+						}
+					]
+				}
+			],
+			"PostProcessing": {
+				"BlendRatio": 1.0,
+				"Smoothing": 100,
+				"SampleRate": 30.0
+			}
+		}
+	]
+}

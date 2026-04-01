@@ -1,0 +1,959 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live2D Player</title>
+<style>
+html,body{margin:0;height:100%;background:#000 url('/res/image/bk.png') no-repeat center center;background-size:cover}
+canvas{display:block}
+ .chat-panel{position:fixed;top:0;right:0;width:30vw;height:100vh;background:rgba(17,24,39,.35);backdrop-filter:blur(4px);color:#fff;overflow-y:auto;padding:12px;box-sizing:border-box;z-index:10;border-left:1px solid #374151}
+ .chat-list{display:flex;flex-direction:column}
+.msg{max-width:88%;margin:10px 0;padding:12px 16px;border-radius:12px;line-height:1.5;font-size:36px;word-break:break-word;font-weight:800}
+.user{align-self:flex-start;background:#1f2937}
+.assistant{align-self:flex-end;background:#374151}
+ .selector{position:fixed;left:0;bottom:calc(28vh + 8px);background:rgba(17,24,39,.75);backdrop-filter:blur(4px);color:#fff;padding:8px;z-index:10}
+.selector select{min-width:280px;background:#111827;color:#fff;border:1px solid #374151;border-radius:6px;padding:6px}
+</style>
+<script src="./pixi.min.js"></script>
+<script src="./live2dcubismcore.min.js"></script>
+<script src="./cubism4.min.js"></script>
+</head>
+<link rel="icon" href="/res/image/logo.ico">
+<body>
+<div id="chat" class="chat-panel"><div class="chat-list"></div></div>
+<div id="selector" class="selector" style="display:none"><select id="modelSelect"><option value="">加载中...</option></select> <select id="motionSelect" disabled><option value="">动作列表</option></select></div>
+<script>
+const app = new PIXI.Application({ resizeTo: window, backgroundAlpha: 0, antialias: true });
+window.PIXI = PIXI;
+document.body.appendChild(app.view);
+
+// --- Apply Font Size from URL ---
+try {
+  const urlParams = new URLSearchParams(window.location.search);
+  const fontSize = urlParams.get('fontsize');
+  if (fontSize) {
+    const style = document.createElement('style');
+    style.innerHTML = `.msg { font-size: ${fontSize}px !important; }`;
+    document.head.appendChild(style);
+  }
+} catch (e) { console.error("Failed to set font size", e); }
+// --------------------------------
+
+let model;
+
+/**
+ * 计算聊天面板的宽度
+ * 当前设置为屏幕宽度的 30%
+ */
+function getChatWidth(){ return Math.floor(window.innerWidth * 0.30); }
+
+/**
+ * 调整 Live2D 模型的大小和位置
+ * 使其适应屏幕剩余空间（避开右侧聊天面板）
+ */
+function fit() {
+  if (!model) return;
+  model.scale.set(1);
+  const w = app.renderer.width;
+  const h = app.renderer.height;
+  const cw = getChatWidth();
+  const visW = Math.max(0, w - cw);
+  const sx = visW / model.width;
+  const sy = h / model.height;
+  const s = Math.min(sx, sy) * 0.9;
+  model.scale.set(s);
+  model.x = visW * 0.35;
+  model.y = h * 0.5;
+}
+
+/**
+ * 加载指定的 Live2D 模型
+ * @param {string} url - 模型配置文件 (.model3.json) 的 URL
+ */
+function load(url) {
+  if (!PIXI || !PIXI.live2d || !PIXI.live2d.Live2DModel) {
+    showText('Live2D 插件未加载');
+    return Promise.reject(new Error('live2d plugin missing'));
+  }
+  try { showText('加载: ' + url); } catch {}
+  return PIXI.live2d.Live2DModel.from(url).then(m => {
+    if (model) { app.stage.removeChild(model); model.destroy({ children: true, texture: true, baseTexture: true }); }
+    model = m;
+    app.stage.addChild(model);
+    model.anchor.set(0.5, 0.5);
+    fit();
+  model.once('ready', fit);
+  model.once('load', fit);
+  populateMotionOptions();
+  try { model.once('ready', populateMotionOptions); } catch {}
+  try { model.once('load', populateMotionOptions); } catch {}
+    const settings = model.internalModel.settings;
+    const groups = Object.keys(settings.motions || {});
+    if (groups.length) {
+      const list = settings.motions[groups[0]] || [];
+      let idx = 0;
+      for (let i=0;i<list.length;i++){
+        const f = list[i].File || list[i].file || '';
+        if (f.indexOf('idle') !== -1) { idx = i; break; }
+      }
+      model.internalModel.motionManager.startMotion(groups[0], idx);
+    }
+    return m;
+  }).catch(err => { try { showText('加载失败: ' + (err && err.message ? err.message : String(err))); } catch {} });
+}
+const select = document.getElementById('modelSelect');
+const motionSelect = document.getElementById('motionSelect');
+
+/**
+ * 获取服务器上 models 目录下的子目录列表
+ * 用于发现可用的模型
+ */
+async function listSubdirs(){ try { const res = await fetch('/models/'); const html = await res.text(); const div = document.createElement('div'); div.innerHTML = html; const anchors = Array.from(div.querySelectorAll('a')); const dirs = anchors.map(a => a.getAttribute('href')||'').filter(h=>h.endsWith('/') && !/^\//.test(h)).map(h=>h.replace(/\/$/, '')); return dirs; } catch { return []; } }
+
+/**
+ * 在指定目录中查找 .model3.json 模型配置文件
+ * 优先查找目录下的同名文件，或遍历查找
+ */
+async function findModelJson(dir){ try { const res = await fetch(`/models/${dir}/`); const html = await res.text(); const div = document.createElement('div'); div.innerHTML = html; const a = Array.from(div.querySelectorAll('a')).find(x => /\.model3\.json$/i.test(x.getAttribute('href')||'')); if (a){ const href = a.getAttribute('href')||''; const url = new URL(`/models/${dir}/${href}`, location.origin).href; return url; } } catch {} try { const candidate = `/models/${dir}/${dir}.model3.json`; const r = await fetch(candidate, { method: 'HEAD' }); if (r.ok) return new URL(candidate, location.origin).href; } catch {} return null; }
+
+/**
+ * 初始化模型列表
+ * 获取可用模型，填充下拉框，并加载默认模型
+ */
+async function populateModels(){
+  let dirs = await listSubdirs();
+  if (dirs.length === 0) dirs = ['police1124'];
+  const items = [];
+  for (const d of dirs){
+    let url = await findModelJson(d);
+    if (!url && d === 'police1124') url = '/models/police1124/警察拆.model3.json';
+    if (url) items.push({ dir: d, url });
+  }
+  select.innerHTML = '';
+  for (const it of items){
+    const opt = document.createElement('option');
+    opt.value = it.url;
+    opt.textContent = it.dir;
+    select.appendChild(opt);
+  }
+  const targetItem = items.find(it => it.dir === 'police1124');
+  if (targetItem) {
+    select.value = targetItem.url;
+    load(targetItem.url);
+  } else if (items.length > 0) {
+    load(items[0].url);
+  } else {
+    load('/models/police1124/警察拆.model3.json');
+  }
+}
+select.addEventListener('change', () => { const url = select.value; if (url) load(url); });
+
+/**
+ * 填充动作（Motion）选择下拉框
+ * 根据当前加载的模型读取其动作组和文件
+ */
+function populateMotionOptions(){
+  if (!model || !model.internalModel || !model.internalModel.settings){
+    motionSelect.innerHTML = '<option value="">动作列表</option>';
+    motionSelect.disabled = true;
+    return;
+  }
+  const settings = model.internalModel.settings;
+  const motions = settings.motions || {};
+  const items = [];
+  for (const group of Object.keys(motions)){
+    const list = motions[group] || [];
+    for (let i=0;i<list.length;i++){
+      const f = list[i].File || list[i].file || '';
+      items.push({ group, idx: i, file: f });
+    }
+  }
+  motionSelect.innerHTML = '';
+  for (const it of items){
+    const opt = document.createElement('option');
+    opt.value = it.group + '|' + String(it.idx);
+    opt.textContent = (it.group || 'group') + ' / ' + (it.file || 'motion');
+    motionSelect.appendChild(opt);
+  }
+  motionSelect.disabled = items.length === 0;
+  const idle = items.find(x => /idle/i.test(x.file || ''));
+  if (idle){ motionSelect.value = idle.group + '|' + String(idle.idx); }
+}
+motionSelect.addEventListener('change', () => {
+  const v = motionSelect.value;
+  if (!v || !model) return;
+  const parts = v.split('|');
+  const group = parts[0];
+  const idx = parseInt(parts[1] || '0', 10);
+  try { model.internalModel.motionManager.startMotion(group, idx); } catch {}
+});
+const style = new PIXI.TextStyle({ fontFamily: 'system-ui', fontSize: 28, fill: 0xffffff, stroke: 0x000000, strokeThickness: 3, dropShadow: true, dropShadowDistance: 2, align: 'center' });
+const caption = new PIXI.Text('', style);
+caption.anchor.set(0.1, -10);
+caption.x = Math.max(0, app.renderer.width - getChatWidth()) / 2;
+caption.y = 30;
+app.stage.addChild(caption);
+let fadeTimer = null;
+
+/** 
+ * 
+ * 显示文本提示
+ * (注：当前实现隐藏了 caption，可能用于调试或暂时禁用了字幕显示)
+ */
+function showText(str) {
+  caption.visible = true;
+}
+const chatPanel = document.getElementById('chat');
+const chatList = chatPanel.querySelector('.chat-list');
+let isTTSPlaying = false; // Flag to suppress ASR while speaking
+let ttsQueue = [];
+let isStreaming = false;
+let backendTtsReqSeq = 0;
+const pendingTtsCallbacks = new Map();
+
+function processTtsQueue() {
+    if (ttsQueue.length === 0) {
+        isStreaming = false;
+        return;
+    }
+    isStreaming = true;
+    while (ttsQueue.length > 0) {
+      const chunk = ttsQueue.shift();
+      speak(chunk);
+    }
+    isStreaming = false;
+}
+
+/**
+ * 核心 TTS (文本转语音) 函数
+ * 停止 ASR，调用浏览器语音合成朗读文本，并同步口型和动作
+ */
+function speak(text, onEnd) {
+  if (!text) return;
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  const ttsText = text.replace(/[\*#`~]+/g, '').trim();
+  if (!ttsText) {
+    if (onEnd) onEnd();
+    else resetIdleTimer();
+    return;
+  }
+  isTTSPlaying = true;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    isTTSPlaying = false;
+    if (onEnd) onEnd();
+    else resetIdleTimer();
+    return;
+  }
+  const reqId = `tts_${Date.now()}_${++backendTtsReqSeq}`;
+  pendingTtsCallbacks.set(reqId, onEnd || null);
+  ws.send(JSON.stringify({ type: 'TTS_SYNTH', req_id: reqId, text: ttsText }));
+}
+
+let idleTimer = null;
+let closeTimer = null;
+let waitingForClose = false;
+const IDLE_DURATION = 10000;
+const CLOSE_WAIT_DURATION = 3000;
+
+function resetIdleTimer() {
+  waitingForClose = false;
+  if (idleTimer) clearTimeout(idleTimer);
+  if (closeTimer) clearTimeout(closeTimer);
+  closeTimer = null;
+  idleTimer = null;
+  
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    idleTimer = setTimeout(onIdleTimeout, IDLE_DURATION);
+  }
+}
+
+function onIdleTimeout() {
+  const text = "请问还有其他可以帮您的吗？";
+  appendMsg('assistant', text);
+  
+  // Enter waiting state
+  waitingForClose = true;
+  
+  // Override the timer set by appendMsg
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
+
+  // Auto wake up so user can reply directly
+  console.log("Idle check prompted");
+
+  speak(text, () => {
+      // Only start close timer if we are still waiting (no interruption)
+      if (waitingForClose) {
+          closeTimer = setTimeout(onCloseTimeout, CLOSE_WAIT_DURATION);
+      }
+  });
+}
+
+function onCloseTimeout() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'CLOSE_PLAYER' }));
+  }
+}
+
+/**
+ * 向聊天面板添加一条新的消息记录
+ * @param {string} role - 'user' 或 'assistant'
+ * @param {string} text - 消息内容
+ */
+function appendMsg(role, text){
+  if (!text) return;
+
+  // Check for explicit "No" response if we are waiting for close
+  if (role === 'user' && (closeTimer || waitingForClose)) {
+     if (text.includes('没有') || text.includes('没') || text.includes('不需要')) {
+         if (ws && ws.readyState === WebSocket.OPEN) {
+             ws.send(JSON.stringify({ type: 'CLOSE_PLAYER' }));
+         }
+         return; 
+     }
+  }
+
+  const item = document.createElement('div');
+  item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+  item.textContent = text;
+  chatList.appendChild(item);
+  chatPanel.scrollTop = chatPanel.scrollHeight;
+  
+  resetIdleTimer();
+}
+
+let ws;
+
+/**
+ * 建立 WebSocket 连接
+ * 处理后端发来的消息（如切换模型、播放动作、TTS文本等）
+ * 并处理断线重连
+ */
+function connect() {
+  ws = new WebSocket('ws://localhost:3399/');
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'MODEL_CHANGE' && (msg.url || msg.path)) {
+        load(msg.url || msg.path);
+      } else if (msg.type === 'STOP_GENERATION') {
+        interrupt();
+      } else if (msg.type === 'ACTION') {
+        if (model) {
+          const s = model.internalModel.settings;
+          const groups = Object.keys(s.motions || {});
+          if (groups.length) {
+            const list = s.motions[groups[0]] || [];
+            const next = Math.floor(Math.random() * list.length);
+            model.internalModel.motionManager.startMotion(groups[0], next);
+          }
+        }
+      } else if (msg.type === 'TTS_CHUNK' && msg.text) {
+        if (isInterrupted) return; // 如果已打断，忽略后续的 chunk
+        const cleanedText = msg.text.replace(/[\*#`~]+/g, '');
+        ttsQueue.push(cleanedText);
+        if (!isStreaming) {
+            processTtsQueue();
+        }
+      } else if (msg.type === 'TTS_PLAYBACK_START') {
+        const t = (msg.text || '').replace(/[\*#`~]+/g, '');
+        isTTSPlaying = true;
+        startTalkingMotions();
+        startLip(t, 1.0);
+      } else if (msg.type === 'TTS_PLAYBACK_END') {
+        stopLip();
+        stopTalkingMotions();
+        isTTSPlaying = false;
+        const cb = pendingTtsCallbacks.get(msg.req_id);
+        if (pendingTtsCallbacks.has(msg.req_id)) {
+          pendingTtsCallbacks.delete(msg.req_id);
+        }
+        if (cb) cb();
+        else resetIdleTimer();
+      } else if (msg.type === 'TTS_AUDIO') {
+        if (msg.backend_played) {
+          return;
+        }
+        stopLip();
+        stopTalkingMotions();
+        isTTSPlaying = false;
+        const cb = pendingTtsCallbacks.get(msg.req_id);
+        if (pendingTtsCallbacks.has(msg.req_id)) {
+          pendingTtsCallbacks.delete(msg.req_id);
+        }
+        if (cb) cb();
+        else resetIdleTimer();
+      } else if (msg.type === 'USER_INPUT') {
+        const text = msg.text;
+        const clean = _normalize(text);
+        
+        // 仅保留明确停止词，避免 TTS 回声里的“小石警官”误触发打断
+        const INTERRUPT_KEYWORDS = ["停", "停下", "别说", "闭嘴", "安静", "打断", "不听"];
+        const hasInterruptWord = INTERRUPT_KEYWORDS.some(k => clean.includes(k));
+
+        // 如果正在说话，仅响应明确停止词进行打断
+        if (isTTSPlaying) {
+            if (hasInterruptWord) {
+                interrupt();
+                // 打断时不显示用户的输入
+                return;
+            }
+            // 正在说话时忽略其他输入
+            return;
+        }
+
+        // 过滤过短的输入（小于4个字），如“嗯”、“啊”、“知道”等
+        if (clean.length < 4) {
+             return;
+        }
+        
+        appendMsg('user', text);
+      } else if (msg.type === 'CHAT_START' && msg.role === 'assistant') {
+        isInterrupted = false; // 新的回复开始，重置打断标记
+        const item = document.createElement('div');
+        item.className = 'msg assistant streaming';
+        item.id = 'streaming-assistant';
+        chatList.appendChild(item);
+        chatPanel.scrollTop = chatPanel.scrollHeight;
+      } else if (msg.type === 'CHAT_PARTIAL' && msg.text) {
+        const streamingItem = document.getElementById('streaming-assistant');
+        if (streamingItem) {
+            streamingItem.textContent += msg.text;
+            chatPanel.scrollTop = chatPanel.scrollHeight;
+        }
+      } else if (msg.type === 'STREAM_END') {
+        const streamingItem = document.getElementById('streaming-assistant');
+        if (streamingItem) {
+            streamingItem.classList.remove('streaming');
+            streamingItem.removeAttribute('id');
+        }
+      } else if ((msg.type === 'CHAT_APPEND' || msg.type === 'CHAT') && msg.text) {
+        const role = msg.role === 'user' ? 'user' : 'assistant';
+        appendMsg(role, msg.text);
+        if (role === 'assistant') speak(msg.text); // 自动朗读助手回复
+      } else if (msg.type === 'CHAT_HISTORY_ITEM') {
+          // 只显示历史记录，不朗读
+          const role = msg.role === 'user' ? 'user' : 'assistant';
+          appendMsg(role, msg.text);
+      } else if (msg.type === 'CHAT_CLEAR') {
+        chatList.innerHTML = '';
+      }
+    } catch {}
+  };
+  ws.onopen = () => {
+    console.log('WS Connected');
+    startAudioMonitorOnly(); // 只启动音频监控(可视化)，不启动浏览器ASR
+    resetIdleTimer();
+  };
+  ws.onclose = () => {
+    console.log('WS Closed, retrying...');
+    // stopASR();
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = (e) => {
+    console.error('WS Error', e);
+  };
+}
+connect();
+
+window.addEventListener('resize', () => {
+  fit();
+  caption.x = Math.max(0, app.renderer.width - getChatWidth()) / 2;
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      window.close();
+    }
+  }
+});
+let recognition;
+let listening = false;
+const WAKE_KEYWORDS = ["小石警官"];
+
+let keepAliveTimer;          // 空文本喂麦定时器
+let talking = false;
+let talkingTimer = null;
+let ttsSpeaking = false;
+let ttsText = '';
+const mouthShapes = { Silence: { open: 0, form: 0 }, A: { open: 1.0, form: 0.0 }, I: { open: 0.0, form: 1.0 }, U: { open: 0.49, form: -1.0 }, E: { open: 0.63, form: 0.83 }, O: { open: 1.0, form: 0.04 } };
+let mouthShape = mouthShapes.Silence;
+
+/**
+ * 文本标准化处理
+ * 主要用于修正语音识别的唤醒词（如把“小时”“消失”纠正为“小石”）
+ */
+function _normalize(s) {
+  let t = (s || "").replace(/[\s,.!?;:，。！？；：、（）()《》〈〉「」『』“”‘’—…·\-]+/g, "");
+  const xiaoShiReplacements = ["小时","消失","小是","小识","小事","肖石","晓石","晓诗","萧石"];
+  for (const v of xiaoShiReplacements) {
+    t = t.split(v).join("小石");
+  }
+  const jingGuanReplacements = ["景观","尽管","警管","井关","金冠","尽关","经管"];
+  for (const v of jingGuanReplacements) {
+    t = t.split(v).join("警官");
+  }
+  return t;
+}
+
+let isInterrupted = false;
+
+/**
+ * 打断当前的 TTS 和动作，并回复
+ */
+function interrupt() {
+    console.log("Interrupting...");
+    
+    ttsQueue = [];
+    isStreaming = false;
+    isTTSPlaying = false; 
+    isInterrupted = true; // 标记已打断，忽略后续 TTS Chunk
+    
+    // 3. 停止动作
+    stopLip();
+    stopTalkingMotions();
+    
+    // 4. 通知后端停止生成
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'STOP_GENERATION' }));
+    }
+    
+    // 5. 播放应答
+    const reply = "好的";
+    speak(reply);
+}
+
+/**
+ * 初始化语音识别对象 (SpeechRecognition)
+ * 配置语言、连续识别模式，并绑定结果处理回调
+ */
+function ensureSR(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  if (!recognition){
+    recognition = new SR();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.onresult = (e) => {
+      const r = e.results[e.results.length-1];
+      if (r && r[0] && r[0].transcript) {
+        const text = r[0].transcript;
+        // showText(text); // Debug: show raw text
+        
+        // 3. 环境噪音阈值检查 (VAD)
+        if (!wasLoudEnough()) {
+             console.log("Ignored quiet noise (VAD)");
+             return;
+        }
+
+        const clean = _normalize(text);
+        
+        // 仅保留明确停止词，避免误打断
+        const INTERRUPT_KEYWORDS = ["停", "停下", "别说", "闭嘴", "安静", "打断", "不听"];
+        
+        const hasWakeWord = WAKE_KEYWORDS.some(k => clean.includes(k));
+        const hasInterruptWord = INTERRUPT_KEYWORDS.some(k => clean.includes(k));
+
+        // 如果正在说话，仅响应唤醒词或打断词进行打断
+        if (isTTSPlaying) {
+            if (hasWakeWord || hasInterruptWord) {
+                interrupt();
+            } else {
+                console.log("Ignored during TTS:", text);
+            }
+            return;
+        }
+        
+        // 4. 短语过滤 (语气词/短词过滤)
+        // 如果文本长度小于 5 个字，且不包含唤醒词或打断词，则认为是语气词或无效输入，直接忽略
+        // 注意：虽然打断逻辑主要在上方 isTTSPlaying 处理，但在静音时如果用户说“再见”或“小石”等词，
+        // 我们也希望保留（交给 LLM 处理），而不是直接过滤掉。
+        if (clean.length < 5 && !hasWakeWord && !hasInterruptWord) {
+             const logMsg = `[Filter] Ignored short text (<5 chars): "${clean}"`;
+             console.log(logMsg);
+             if (ws && ws.readyState === WebSocket.OPEN) {
+                 ws.send(JSON.stringify({ type: 'LOG', text: logMsg }));
+             }
+             return;
+        }
+        
+        // 如果没在说话，直接处理对话
+        showText(text);
+        appendMsg('user', text);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ASR_RESULT', text }));
+        }
+      }
+    };
+    recognition.onend = () => {
+      listening = false;
+      // 超时或任何原因结束都立即重启，保持长驻监听
+      // 除非正在进行语音合成(TTS)
+      if (recognition && !isTTSPlaying) {
+        recognition.start();
+        listening = true;
+      }
+    };
+    recognition.onstart = () => {
+      listening = true;
+    };
+    recognition.onerror = () => {
+      listening = false;
+      setTimeout(startASR, 1000);
+    };
+  }
+  return recognition;
+}
+
+let audioContext;
+let analyser;
+let microphone;
+let dataArray;
+let isNoise = true;
+let speechStartTime = 0;
+
+// 自适应噪音阈值相关变量
+let noiseFloor = 5; // 初始噪音底噪估计值
+let minVolHistory = []; // 记录最近几秒的最低音量
+let tempMinVol = 255;
+let frameCount = 0;
+const NOISE_MARGIN = 3; // 动态阈值 = noiseFloor + NOISE_MARGIN
+
+function updateNoiseFloor(vol) {
+    tempMinVol = Math.min(tempMinVol, vol);
+    frameCount++;
+    
+    // 每 60 帧 (约 1 秒) 更新一次历史记录
+    if (frameCount >= 60) { 
+        minVolHistory.push(tempMinVol);
+        if (minVolHistory.length > 5) minVolHistory.shift(); // 保持最近 5 秒
+        
+        // 更新底噪：取最近 5 秒内最低音量的平均值或最小值
+        // 这里取最小值，保证底噪估计偏保守，避免切掉小声说话
+        if (minVolHistory.length > 0) {
+             noiseFloor = Math.min(...minVolHistory);
+             const logMsg = `[VAD] Noise Floor Updated: ${noiseFloor.toFixed(2)} | Threshold: ${(noiseFloor + NOISE_MARGIN).toFixed(2)}`;
+             console.log(logMsg);
+             if (ws && ws.readyState === WebSocket.OPEN) {
+                 ws.send(JSON.stringify({ type: 'LOG', text: logMsg }));
+             }
+        }
+        
+        tempMinVol = 255; // 重置当前秒最小值
+        frameCount = 0;
+    }
+    
+    // 快速初始化：如果还没积累足够历史，直接跟随当前音量（如果是静音环境）
+    if (minVolHistory.length === 0) {
+        // 使用简单的低通滤波快速逼近
+        if (vol < noiseFloor) noiseFloor = vol;
+        else noiseFloor = noiseFloor * 0.95 + vol * 0.05;
+    }
+    
+    return noiseFloor;
+}
+
+const SPEECH_MIN_DURATION = 300; // Minimum duration of loud sound to be considered speech (ms)
+
+async function setupAudioMonitor(stream) {
+    try {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+        }
+        if (microphone) {
+             microphone.disconnect();
+        }
+        microphone = audioContext.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+        
+        monitorVolume();
+    } catch(e) { console.error("Audio monitor setup failed:", e); }
+}
+
+function monitorVolume() {
+    if (!analyser) return;
+    
+    requestAnimationFrame(monitorVolume);
+    analyser.getByteTimeDomainData(dataArray);
+
+    let sum = 0;
+    for(let i = 0; i < dataArray.length; i++) {
+        sum += Math.abs(dataArray[i] - 128);
+    }
+    const average = sum / dataArray.length;
+    // console.log("Vol:", average); // Debug volume
+
+    // 更新自适应底噪
+    updateNoiseFloor(average);
+    const dynamicThreshold = noiseFloor + NOISE_MARGIN;
+    
+    // 将当前阈值存入历史，以便 wasLoudEnough 检查时使用对应时刻的阈值
+    // 或者简单点，wasLoudEnough 使用最新的 dynamicThreshold 也可以，误差不大
+
+    if (average > dynamicThreshold) {
+        if (isNoise) {
+            speechStartTime = performance.now();
+            isNoise = false;
+        }
+    } else {
+        // Reset if silence persists for a bit (debounce)? 
+        // For simplicity, just mark as noise if it drops. 
+        // But ASR result comes *after* speech, so we need to know if there WAS loud speech recently.
+    }
+    
+    // Logic: Keep track of "max volume in last 2 seconds"
+    updateVolumeHistory(average, dynamicThreshold);
+}
+
+const volumeHistory = [];
+function updateVolumeHistory(vol, threshold) {
+    const now = performance.now();
+    volumeHistory.push({ t: now, v: vol, th: threshold });
+    // Keep last 2 seconds
+    while(volumeHistory.length > 0 && volumeHistory[0].t < now - 2000) {
+        volumeHistory.shift();
+    }
+}
+
+function wasLoudEnough() {
+    // Check if any volume sample in history exceeded its threshold
+    return volumeHistory.some(h => h.v > h.th);
+}
+
+/**
+ * 仅启动音频监控 (用于可视化)，不进行语音识别
+ */
+async function startAudioMonitorOnly() {
+    console.log("Audio monitor (visualization) disabled to prevent microphone permission prompt.");
+    /*
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setupAudioMonitor(stream);
+    } catch(e) {
+        console.error("Audio monitor setup failed:", e);
+    }
+    */
+}
+
+/**
+ * 启动语音识别 (Deprecated: 现已改用后端 Alibaba ASR)
+ * 申请麦克风权限并开始监听
+ */
+async function startASR(){
+  console.log("Browser ASR is disabled. Using backend Alibaba ASR.");
+  // Send signal to backend to ensure ASR is in chat mode
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ASR_START_LOCAL' }));
+  }
+  
+  // Audio monitor disabled to prevent microphone permission prompt
+  // Backend now handles ASR and audio capture
+  /*
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setupAudioMonitor(stream);
+  } catch(e) {
+    console.error("Audio monitor failed:", e);
+  }
+  */
+}
+
+/**
+ * 停止语音识别
+ */
+function stopASR(){
+  console.log("Browser ASR stopped (logical only).");
+  // Backend ASR is managed by backend state
+}
+let lipRaf = null;
+let lipPulse = 0;
+let lipPulseUntil = 0;
+let lipNextAt = 0;
+let mouthVal = 0;
+let lipCharMs = 140;
+
+/**
+ * 设置 Live2D 模型的嘴巴张开度
+ * @param {number} v - 0.0 (闭合) 到 1.0 (张开)
+ */
+function setMouth(v){
+  try {
+    if (!model || !model.internalModel || !model.internalModel.coreModel) return;
+    const core = model.internalModel.coreModel;
+    core.setParameterValueById('ParamMouthOpenY', Math.max(0, Math.min(1, v)));
+  } catch(e){}
+}
+
+/**
+ * 设置 Live2D 模型的嘴型 (口形)
+ * @param {number} v - -1.0 到 1.0 (控制嘴巴形状)
+ */
+function setMouthForm(v){
+  try {
+    if (!model || !model.internalModel || !model.internalModel.coreModel) return;
+    const core = model.internalModel.coreModel;
+    core.setParameterValueById('ParamMouthForm', Math.max(-1, Math.min(1, v)));
+  } catch(e){}
+}
+
+/**
+ * 触发一次口型脉冲
+ * 用于模拟说话时的嘴巴开合节奏
+ */
+function triggerLipPulse(){
+  const now = performance.now();
+  lipPulse = 1;
+  lipPulseUntil = now + 80;
+}
+
+/**
+ * 根据字符选择对应的元音嘴型
+ * (A, I, U, E, O, Silence)
+ */
+function pickMouthShape(ch){
+  const c = (ch || '').toLowerCase();
+  if (c === 'a') return mouthShapes.A;
+  if (c === 'e') return mouthShapes.E;
+  if (c === 'i') return mouthShapes.I;
+  if (c === 'o') return mouthShapes.O;
+  if (c === 'u') return mouthShapes.U;
+  if (/\s|[,.!?;:，。！？；：、（）()《》〈〉“”‘’]/.test(c)) return mouthShapes.Silence;
+  const r = Math.random();
+  if (r < 0.4) return mouthShapes.E;
+  if (r < 0.75) return mouthShapes.O;
+  return mouthShapes.U;
+}
+
+/**
+ * 根据 TTS 朗读到的字符索引更新嘴型
+ */
+function updateMouthShapeFromIndex(text, idx){
+  let ch = '';
+  try { if (typeof idx === 'number' && idx >= 0 && idx < String(text||'').length) ch = String(text||'')[idx] || ''; } catch {}
+  const s = pickMouthShape(ch);
+  if (s) mouthShape = s;
+}
+
+/**
+ * 口型动画帧循环
+ * 控制嘴巴的平滑开合动画
+ */
+function lipStep(now){
+  if (now >= lipNextAt){
+    lipPulse = 1;
+    lipPulseUntil = now + 70;
+    lipNextAt = now + lipCharMs * (0.7 + 0.6 * Math.random());
+  }
+  if (now > lipPulseUntil) lipPulse = 0;
+  mouthVal = mouthVal * 0.6 + lipPulse * 0.4;
+  const finalOpen = Math.max(0, Math.min(1, mouthVal * 0.7 + (mouthShape.open||0) * 0.3));
+  setMouth(finalOpen);
+  setMouthForm((mouthShape.form||0) * 1.0);
+  lipRaf = requestAnimationFrame(lipStep);
+}
+
+/**
+ * 开始口型同步动画
+ * 在 TTS 开始时调用
+ */
+function startLip(text, rate){
+  ttsSpeaking = true;
+  ttsText = String(text||'');
+  mouthVal = 0;
+  lipNextAt = performance.now() + 90;
+  lipCharMs = Math.max(60, 160 / Math.max(0.5, rate || 1));
+  if (!lipRaf) lipRaf = requestAnimationFrame(lipStep);
+}
+
+/**
+ * 停止口型同步动画
+ * 在 TTS 结束时调用
+ */
+function stopLip(){
+  ttsSpeaking = false;
+  try { if (lipRaf) cancelAnimationFrame(lipRaf); } catch(e){}
+  lipRaf = null;
+  mouthVal = 0;
+  setMouth(0);
+  setMouthForm(0);
+}
+
+/**
+ * 随机播放一个动作
+ * 排除 'idle' (待机) 动作
+ */
+function playRandomMotion(){
+  if (!model || !model.internalModel || !model.internalModel.settings) return;
+  const s = model.internalModel.settings;
+  const motions = s.motions || {};
+  const pool = [];
+  for (const g of Object.keys(motions)){
+    const list = motions[g] || [];
+    for (let i=0;i<list.length;i++){
+      const f = list[i].File || list[i].file || '';
+      if (!/idle/i.test(f)) pool.push({ group: g, idx: i });
+    }
+  }
+  if (!pool.length) return;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  try { model.internalModel.motionManager.startMotion(pick.group, pick.idx); } catch {}
+}
+
+/**
+ * 开始说话时的随机动作循环
+ */
+function startTalkingMotions(){
+  if (talking) return;
+  talking = true;
+  playRandomMotion();
+  scheduleNextTalkingMotion();
+}
+
+/**
+ * 安排下一次随机动作播放
+ * 模拟说话时自然的手势变化
+ */
+function scheduleNextTalkingMotion(){
+  if (!talking) return;
+  const t = 1500 + Math.random() * 2500;
+  talkingTimer = setTimeout(() => { playRandomMotion(); scheduleNextTalkingMotion(); }, t);
+}
+
+/**
+ * 停止说话动作循环
+ * 并恢复到 idle 待机动作
+ */
+function stopTalkingMotions(){
+  talking = false;
+  if (talkingTimer) { clearTimeout(talkingTimer); talkingTimer = null; }
+  if (!model || !model.internalModel || !model.internalModel.settings) return;
+  const settings = model.internalModel.settings;
+  const groups = Object.keys(settings.motions || {});
+  if (groups.length) {
+    const list = settings.motions[groups[0]] || [];
+    let idx = 0;
+    for (let i=0;i<list.length;i++){
+      const f = list[i].File || list[i].file || '';
+      if (f.indexOf('idle') !== -1) { idx = i; break; }
+    }
+    try { model.internalModel.motionManager.startMotion(groups[0], idx); } catch {}
+  }
+}
+window.addEventListener('load', () => {
+  populateModels();
+  startASR();
+});
+
+</script>
+</body>
+</html>
