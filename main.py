@@ -2301,21 +2301,21 @@ class TrayApp(QApplication):
             except Exception:
                 pass
             
+            # 如果所有客户端都断开，自动切换回唤醒模式
             if not self.ws_clients:
                 if self.player_active:
                     self.player_launch_started_ts = time.monotonic()
                     self._on_log("前端连接已断开，等待页面重连")
-                    if self.worker:
-                        self._apply_listener_state("chat", False, False, False, "前端断开等待重连")
                 else:
                     self.player_launch_started_ts = 0.0
-                    self._on_log("All clients disconnected, switching to wake mode")
-                    if self.worker:
-                        self._to_wake_mode("前端断开")
-                    try:
-                        self.window_manager.restore_context()
-                    except Exception as e:
-                        self._on_log(f"Context restore failed: {e}")
+                self._on_log("All clients disconnected, switching to wake mode")
+                if self.worker:
+                    self._to_wake_mode("前端断开")
+                
+                try:
+                    self.window_manager.restore_context()
+                except Exception as e:
+                    self._on_log(f"Context restore failed: {e}")
 
     async def ask_llm(self, text: str, hidden_input: bool = False):
         """
