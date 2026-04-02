@@ -193,6 +193,9 @@ class TrayApp(QApplication):
         self.force_exit_watch_started_ts = 0.0
         self.wake_grace_seconds = 8.0
         self.last_tts_start_ts = 0.0
+        self.last_tts_start_wallclock_ts = 0.0
+        self.last_tts_end_wallclock_ts = 0.0
+        self.force_exit_guard_armed = False
         self.force_exit_check_interval_ms = 10000
         self.force_exit_timeout_seconds = 23.6
         self._reload_force_exit_guard_config()
@@ -821,6 +824,7 @@ class TrayApp(QApplication):
         self.is_speaking = True
         self.last_speaking_start_ts = time.monotonic()
         self.last_tts_start_ts = time.monotonic()
+        self.last_tts_start_wallclock_ts = time.time()
         self._cancel_idle_timers()
         try:
             if self.worker:
@@ -839,6 +843,7 @@ class TrayApp(QApplication):
 
     def _mark_tts_end(self):
         self._awaiting_tts_start = False
+        self.last_tts_end_wallclock_ts = time.time()
         self.force_exit_watch_started_ts = 0.0
         try:
             self.tts_start_wait_timer.stop()
@@ -1012,7 +1017,14 @@ class TrayApp(QApplication):
         normalized = self._normalize_text(text)
         if not normalized:
             return False
-        return normalized in {"你好请讲", "您好请讲"}
+        default_intro = "你好，请讲！"
+        configured_intro = str(self.cfg.get("wake_intro_text", default_intro) or "").strip()
+        configured_norm = self._normalize_text(configured_intro) if configured_intro else ""
+        candidates = {"你好请讲", "您好请讲"}
+        if configured_norm:
+            candidates.add(configured_norm)
+        return normalized in candidates
+
     def _should_suppress_short_ack(self) -> bool:
         if not self._in_wake_grace():
             return False
@@ -1644,6 +1656,7 @@ class TrayApp(QApplication):
     def _to_wake_mode(self, reason: str):
         self.awaiting_response = False
         self._awaiting_tts_start = False
+        self.force_exit_guard_armed = False
         self.force_exit_watch_started_ts = 0.0
         self._apply_listener_state("wake", False, True, False, reason)
 
@@ -2432,7 +2445,10 @@ class TrayApp(QApplication):
             
             if is_wake_command:
                 self._set_single_turn_close_pending(False)
-                intro_text = "你好，请讲！"
+                default_intro = "你好，请讲！"
+                intro_text = str(self.cfg.get("wake_intro_text", default_intro) or "").strip() or default_intro
+                self.force_exit_guard_armed = True
+                self.last_tts_end_wallclock_ts = time.time()
                 if not hidden_input:
                     self.chat_history.append({"role": "user", "content": text})
 
@@ -2461,7 +2477,13 @@ class TrayApp(QApplication):
 
                 client = AsyncOpenAI(base_url=base_url, api_key=api_key)
                 
-                system_prompt = "你是一位包头公安局石拐分局的数字人民警，负责为群众解答警务、法律方面的问题，你的回答必须专业、诚挚、热情，绝对不能有任何不耐烦，指责意味的回答，为了保证对话的连贯性，回答内容控制在200字以内。注意：你叫“小石警官”或者有时被人误叫成“小时景观”或者其他发音为“xiao shi jin（g） guan”这都是在呼唤你，不要搞错了。"
+                default_system_prompt = "你是一位包头公安局石拐分局的数字人民警，负责为群众解答警务、法律方面的问题，你的回答必须专业、诚挚、热情，绝对不能有任何不耐烦，指责意味的回答，为了保证对话的连贯性，回答内容控制在200字以内。注意：你叫“小石警官”或者有时被人误叫成“小时景观”或者其他发音为“xiao shi jin（g） guan”这都是在呼唤你，不要搞错了。"
+                extra_prompt = str(self.cfg.get("llm_system_prompt_extra", self.cfg.get("llm_system_prompt", "")) or "").strip()
+                if extra_prompt == default_system_prompt:
+                    extra_prompt = ""
+                elif extra_prompt.startswith(default_system_prompt):
+                    extra_prompt = extra_prompt[len(default_system_prompt):].lstrip()
+                system_prompt = default_system_prompt if not extra_prompt else (default_system_prompt + "\n" + extra_prompt)
                 
                 messages = [{"role": "system", "content": system_prompt}]  
 
@@ -2800,7 +2822,10 @@ class TrayApp(QApplication):
         self.awaiting_response = False
         self._awaiting_tts_start = False
         self._on_log(f"唤醒完成: wake_time={self.last_wake_wallclock}")
-        intro_text = "你好，请讲！"
+        self.force_exit_guard_armed = True
+        self.last_tts_end_wallclock_ts = time.time()
+        default_intro = "你好，请讲！"
+        intro_text = str(self.cfg.get("wake_intro_text", default_intro) or "").strip() or default_intro
         
         if self.ws_clients:
             # 如果已连接，直接发送唤醒信号和欢迎语
@@ -3111,20 +3136,20 @@ class TrayApp(QApplication):
         try:
             if not self.player_active:
                 return
-            if len(self.ws_clients) == 0:
+            if not bool(getattr(self, "force_exit_guard_armed", False)):
                 return
-            is_chat_idle = False
-            if self.worker and getattr(self.worker, "_mode", "") == "chat":
-                is_chat_idle = True
-                
-            if not (self.awaiting_response or self.is_speaking or self._awaiting_tts_start or is_chat_idle):
+            if self.is_speaking or self._awaiting_tts_start:
                 return
-            watch_started_ts = float(self.force_exit_watch_started_ts or 0.0)
-            if watch_started_ts <= 0:
-                return
-            delta = time.time() - watch_started_ts
             timeout_sec = float(self.force_exit_timeout_seconds)
-            if delta <= timeout_sec:
+            last_start = float(getattr(self, "last_tts_start_wallclock_ts", 0.0) or 0.0)
+            last_ts = float(getattr(self, "last_tts_end_wallclock_ts", 0.0) or 0.0)
+            if last_ts <= 0:
+                last_ts = time.time()
+                self.last_tts_end_wallclock_ts = last_ts
+            if last_start > 0 and last_start > last_ts:
+                return
+            delta = time.time() - last_ts
+            if delta < timeout_sec:
                 return
             self._on_log(f"兜底退出触发: 当前会话 {delta:.1f}s 无进展，执行强制关闭")
             self.close_player()

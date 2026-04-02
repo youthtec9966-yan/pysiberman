@@ -179,6 +179,33 @@ class SettingsDialog(QDialog):
         self.kws_enabled = QCheckBox("启用 Porcupine KWS 唤醒")
         self.kws_enabled.setChecked(bool(self.cfg.get("kws_enabled", False)))
         self.llm_model = QLineEdit(self.cfg.get("llm_model", "doubao-seed-1-6-flash-250828"))
+        default_system_prompt = "你是一位包头公安局石拐分局的数字人民警，负责为群众解答警务、法律方面的问题，你的回答必须专业、诚挚、热情，绝对不能有任何不耐烦，指责意味的回答，为了保证对话的连贯性，回答内容控制在200字以内。注意：你叫“小石警官”或者有时被人误叫成“小时景观”或者其他发音为“xiao shi jin（g） guan”这都是在呼唤你，不要搞错了。"
+        self.llm_system_prompt = QPlainTextEdit()
+        try:
+            self.llm_system_prompt.setPlaceholderText("可选：在系统基础人设上补充额外规则/口径/禁忌/必备知识等")
+        except Exception:
+            pass
+        stored_extra = str(self.cfg.get("llm_system_prompt_extra", "") or "").strip()
+        legacy = str(self.cfg.get("llm_system_prompt", "") or "").strip()
+        if not stored_extra and legacy:
+            if legacy == default_system_prompt:
+                stored_extra = ""
+            elif legacy.startswith(default_system_prompt):
+                stored_extra = legacy[len(default_system_prompt):].lstrip()
+            else:
+                stored_extra = legacy
+        self.llm_system_prompt.setPlainText(stored_extra)
+        try:
+            self.llm_system_prompt.setMinimumHeight(140)
+        except Exception:
+            pass
+        default_wake_intro = "你好，请讲！"
+        self.wake_intro_text = QLineEdit()
+        try:
+            self.wake_intro_text.setPlaceholderText("唤醒后开场白，例如：你好，请讲！")
+        except Exception:
+            pass
+        self.wake_intro_text.setText(str(self.cfg.get("wake_intro_text", default_wake_intro) or "").strip() or default_wake_intro)
         self.tts_model = QComboBox()
         self.tts_model.setEditable(True)
         for name in ["cosyvoice-v3-flash", "cosyvoice-v1"]:
@@ -195,7 +222,7 @@ class SettingsDialog(QDialog):
         self.tts_voice.setEditable(True)
         for name in ["longxiang", "longyuan", "longfei", "longtong", "longshuo", "longshu", "longlaotie", "longxiaocheng", "longxiaochun"]:
             self.tts_voice.addItem(name, name)
-        tts_voice = str(self.cfg.get("aliyun_tts_voice", "longxiang") or "longxiang").strip()
+        tts_voice = str(self.cfg.get("aliyun_tts_voice", "longshuo") or "longshuo").strip()
         if self.tts_voice.findText(tts_voice) < 0:
             self.tts_voice.addItem(tts_voice, tts_voice)
         self.tts_voice.setCurrentText(tts_voice)
@@ -207,10 +234,12 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.addRow("LLM Base URL", self.llm_base_url)
         form.addRow("LLM API Key", self.llm_api_key)
+        form.addRow("LLM 模型", self.llm_model)
         form.addRow("ASR API Key", self.asr_api_key)
         form.addRow("KWS 唤醒", self.kws_enabled)
         form.addRow("Porcupine AccessKey", self.porcupine_access_key)
-        form.addRow("LLM 模型", self.llm_model)
+        form.addRow("补充提示词", self.llm_system_prompt)
+        form.addRow("唤醒开场白", self.wake_intro_text)
         form.addRow("TTS 模型", self.tts_model)
         form.addRow("TTS 音色（男声）", self.tts_voice)
         form.addRow("唤醒方式", self.engine_combo)
@@ -232,7 +261,7 @@ class SettingsDialog(QDialog):
         self.force_exit_timeout_seconds.setRange(1.0, 300.0)
         self.force_exit_timeout_seconds.setSingleStep(0.1)
         self.force_exit_timeout_seconds.setDecimals(1)
-        self.force_exit_timeout_seconds.setValue(float(self.cfg.get("force_exit_timeout_seconds", 23.6)))
+        self.force_exit_timeout_seconds.setValue(float(self.cfg.get("force_exit_timeout_seconds", 33.6)))
         form.addRow("兜底强退阈值(s)", self.force_exit_timeout_seconds)
         self.idle_prompt_seconds = QDoubleSpinBox()
         self.idle_prompt_seconds.setRange(1.0, 120.0)
@@ -371,6 +400,8 @@ class SettingsDialog(QDialog):
         """
         self.cfg.set("llm_base_url", self.llm_base_url.text())
         self.cfg.set("llm_model", self.llm_model.text())
+        self.cfg.set("llm_system_prompt_extra", self.llm_system_prompt.toPlainText().strip())
+        self.cfg.set("wake_intro_text", self.wake_intro_text.text().strip())
         selected_index = self.device_combo.currentData()
         try:
             selected_index = int(selected_index)
