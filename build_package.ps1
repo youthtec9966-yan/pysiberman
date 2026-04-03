@@ -45,6 +45,11 @@ foreach ($file in $requiredFiles) {
     }
 }
 
+$pyMajorMinor = (& $pythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+if ($pyMajorMinor -ne "3.12") {
+    throw ".venv312 Python version mismatch: $pyMajorMinor (expected 3.12)"
+}
+
 $isccCandidates = @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
@@ -65,14 +70,20 @@ if (-not $SkipClean) {
     if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
 }
 
-Write-Host "[1/5] 语法检查 main.py / asr_worker.py"
+Write-Host "[1/6] 依赖导入自检"
+Invoke-Checked -Name "依赖导入自检" -FilePath $pythonExe -Arguments @(
+    "-c",
+    "import dashscope,openai,websockets,pvrecorder,pvporcupine,python_speech_features,fastdtw,scipy"
+)
+
+Write-Host "[2/6] 语法检查 main.py / asr_worker.py"
 & $pythonExe -m py_compile $mainPy $asrPy
 
 if (-not $SkipPyInstaller) {
-    Write-Host "[2/5] 执行 PyInstaller"
-    Invoke-Checked -Name "PyInstaller" -FilePath $pythonExe -Arguments @("-m", "PyInstaller", "--noconfirm", $specFile)
+    Write-Host "[3/6] 执行 PyInstaller"
+    Invoke-Checked -Name "PyInstaller" -FilePath $pythonExe -Arguments @("-m", "PyInstaller", "--clean", "--noconfirm", $specFile)
 } else {
-    Write-Host "[2/5] 跳过 PyInstaller"
+    Write-Host "[3/6] 跳过 PyInstaller"
 }
 
 $verifyPaths = @(
@@ -87,7 +98,7 @@ $verifyPaths = @(
     (Join-Path $projectRoot "dist\pySiberMan\_internal\pvrecorder\lib\windows\amd64\libpv_recorder.dll")
 )
 
-Write-Host "[3/5] 校验关键打包产物"
+Write-Host "[4/6] 校验关键打包产物"
 foreach ($path in $verifyPaths) {
     if (-not (Test-Path $path)) {
         throw "关键产物缺失: $path"
@@ -95,7 +106,7 @@ foreach ($path in $verifyPaths) {
 }
 
 if (-not $SkipInno) {
-    Write-Host "[4/5] 执行 Inno Setup"
+    Write-Host "[5/6] 执行 Inno Setup"
     $innoStart = Get-Date
     $ok = $false
     for ($i = 1; $i -le 3; $i++) {
@@ -112,10 +123,10 @@ if (-not $SkipInno) {
         throw "Inno Setup 多次重试后仍失败"
     }
 } else {
-    Write-Host "[4/5] 跳过 Inno Setup"
+    Write-Host "[5/6] 跳过 Inno Setup"
 }
 
-Write-Host "[5/5] 输出最新安装包"
+Write-Host "[6/6] 输出最新安装包"
 $setupCandidates = Get-ChildItem -Path (Join-Path $projectRoot "output\pySiberMan-setup-*.exe") -ErrorAction Stop
 if ($SkipInno) {
     $latestSetup = $setupCandidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1

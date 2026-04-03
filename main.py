@@ -999,7 +999,8 @@ class TrayApp(QApplication):
         return True
 
     def _looks_like_manual_attention_call(self, text: str) -> bool:
-        normalized = self._normalize_text(text)
+        normalized = self._normalize_text(text)  
+        
         if not normalized:
             return False
         aliases = ("小石警官", "小石", "警官")
@@ -1327,6 +1328,7 @@ class TrayApp(QApplication):
             return
         if hasattr(self, 'ws_loop') and self.ws_loop and self.ws_loop.is_running():
             try:
+                self.awaiting_response = True
                 asyncio.run_coroutine_threadsafe(self._process_committed_user_input(text), self.ws_loop)
             except Exception:
                 self.awaiting_response = False
@@ -2004,7 +2006,8 @@ class TrayApp(QApplication):
     def _reload_tts_config(self):
         self.tts_model = str(self.cfg.get("aliyun_tts_model", "cosyvoice-v3-flash") or "cosyvoice-v3-flash").strip()
         self.tts_voice = str(self.cfg.get("aliyun_tts_voice", "longxiang") or "longxiang").strip()
-        self._on_log(f"TTS 设置已应用: model={self.tts_model} voice={self.tts_voice}")
+        self.tts_rate = self._normalize_aliyun_tts_rate(self.cfg.get("aliyun_tts_rate", 1.1))
+        self._on_log(f"TTS 设置已应用: model={self.tts_model} voice={self.tts_voice} rate={self.tts_rate:.2f}")
 
     def _normalize_aliyun_tts_rate(self, value) -> float:
         try:
@@ -2509,6 +2512,36 @@ class TrayApp(QApplication):
                 first_chunk = True
                 last_tts_flush_ts = time.monotonic()
                 sent_any_tts = False
+                strong_puncts_cn = "。！？；"
+                strong_puncts_ascii = ".!?;"
+
+                def _is_ascii_sentence_break(text: str, idx: int) -> bool:
+                    if idx < 0 or idx >= len(text):
+                        return False
+                    ch = text[idx]
+                    if ch not in strong_puncts_ascii:
+                        return False
+                    prev_ch = text[idx - 1] if idx > 0 else ""
+                    next_ch = text[idx + 1] if idx + 1 < len(text) else ""
+                    if ch == ".":
+                        if prev_ch.isdigit() and next_ch.isdigit():
+                            return False
+                        if prev_ch.isalpha() and next_ch.isalpha():
+                            return False
+                    return True
+
+                def _find_last_sentence_break(text: str) -> int:
+                    for i in range(len(text) - 1, -1, -1):
+                        ch = text[i]
+                        if ch in strong_puncts_cn:
+                            return i
+                        if ch in strong_puncts_ascii and _is_ascii_sentence_break(text, i):
+                            return i
+                    return -1
+
+                def _has_sentence_break(text: str) -> bool:
+                    return _find_last_sentence_break(text) >= 0
+
                 def _flush_tts(force: bool = False, punct_triggered: bool = False):
                     nonlocal buffer, last_tts_flush_ts, sent_any_tts
                     if not buffer:
@@ -2518,39 +2551,31 @@ class TrayApp(QApplication):
                     elapsed = now - last_tts_flush_ts
                     min_len = 26 if not sent_any_tts else 42
                     max_wait = 0.65 if not sent_any_tts else 0.95
-                    if not force:
-                        if len(buf) < min_len and elapsed < max_wait:
-                            return
-                    elif punct_triggered:
+                    if force:
+                        out = buf.strip()
+                        next_buffer = ""
+                        if out and not self.stop_generation:
+                            buffer = next_buffer
+                            self.ws_broadcast({"type": "TTS_CHUNK", "text": out})
+                            sent_any_tts = True
+                            last_tts_flush_ts = time.monotonic()
+                        return
+
+                    should_flush = punct_triggered
+                    if not should_flush and len(buf) < min_len and elapsed < max_wait:
+                        return
+                    if punct_triggered:
                         short_hold = 18 if not sent_any_tts else 14
                         punct_wait = 0.90 if not sent_any_tts else 0.55
                         if len(buf) < short_hold and elapsed < punct_wait:
                             return
-                    cut = -1
-                    for p in "。！？；.!?;\n":
-                        i = buf.rfind(p)
-                        if i > cut:
-                            cut = i
-                    if cut < 0:
-                        for p in "，,、:：":
-                            i = buf.rfind(p)
-                            if i > cut:
-                                cut = i
-                    if cut < 0:
-                        i = buf.rfind(" ")
-                        if i >= 0:
-                            cut = i
+                    cut = _find_last_sentence_break(buf)
                     next_buffer = ""
-                    if force:
-                        out = buf.strip()
-                        next_buffer = ""
+                    if cut >= 0:
+                        out = buf[:cut + 1].strip()
+                        next_buffer = buf[cut + 1:]
                     else:
-                        if cut >= 0:
-                            out = buf[:cut + 1].strip()
-                            next_buffer = buf[cut + 1:]
-                        else:
-                            out = buf.strip()
-                            next_buffer = ""
+                        return
                     compact_out = re.sub(r"\s+", "", out or "")
                     normalized_out = compact_out.strip("，,。！？!?；;：:、…~")
                     compact_next = re.sub(r"\s+", "", next_buffer or "")
@@ -2579,8 +2604,8 @@ class TrayApp(QApplication):
                             first_chunk = False
                         full_content += content
                         buffer += content
-                        has_strong_punct = any(p in content for p in "。！？；.!?;\n")
-                        _flush_tts(force=has_strong_punct, punct_triggered=has_strong_punct)
+                        has_strong_punct = _has_sentence_break(content)
+                        _flush_tts(force=False, punct_triggered=has_strong_punct)
                         self.ws_broadcast({"type": "CHAT_PARTIAL", "text": content})
                 
                 if buffer and not self.stop_generation:
@@ -3215,6 +3240,15 @@ if __name__ == "__main__":
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
 
+    try:
+        mutex_name = "Local\\pySiberMan_SingleInstance_Mutex"
+        mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+        already_exists = ctypes.windll.kernel32.GetLastError() == 183
+        if already_exists:
+            sys.exit(0)
+    except Exception:
+        mutex_handle = None
+
     # Try to clean up existing instances or processes holding ports
     try:
         current_pid = os.getpid()
@@ -3231,4 +3265,11 @@ if __name__ == "__main__":
         pass
 
     app = TrayApp(sys.argv)
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    try:
+        if mutex_handle:
+            ctypes.windll.kernel32.ReleaseMutex(mutex_handle)
+            ctypes.windll.kernel32.CloseHandle(mutex_handle)
+    except Exception:
+        pass
+    sys.exit(exit_code)

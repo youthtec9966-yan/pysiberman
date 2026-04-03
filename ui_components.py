@@ -230,6 +230,11 @@ class SettingsDialog(QDialog):
             self.tts_voice.setInsertPolicy(QComboBox.NoInsert)
         except Exception:
             pass
+        self.tts_rate = QDoubleSpinBox()
+        self.tts_rate.setRange(0.5, 2.0)
+        self.tts_rate.setSingleStep(0.05)
+        self.tts_rate.setDecimals(2)
+        self.tts_rate.setValue(float(self.cfg.get("aliyun_tts_rate", 1.1)))
 
         form = QFormLayout()
         form.addRow("LLM Base URL", self.llm_base_url)
@@ -242,6 +247,7 @@ class SettingsDialog(QDialog):
         form.addRow("唤醒开场白", self.wake_intro_text)
         form.addRow("TTS 模型", self.tts_model)
         form.addRow("TTS 音色（男声）", self.tts_voice)
+        form.addRow("TTS 语速", self.tts_rate)
         form.addRow("唤醒方式", self.engine_combo)
         form.addRow("ASR 唤醒短语", self.asr_phrases)
         form.addRow("ASR 模型大小", self.asr_model)
@@ -418,6 +424,7 @@ class SettingsDialog(QDialog):
         self.cfg.set("asr_model_dir", self.asr_model_dir.text())
         self.cfg.set("aliyun_tts_model", self.tts_model.currentText().strip())
         self.cfg.set("aliyun_tts_voice", self.tts_voice.currentText().strip())
+        self.cfg.set("aliyun_tts_rate", float(self.tts_rate.value()))
         self.cfg.set("chat_font_size", self.chat_font_size.value())
         self.cfg.set("force_exit_check_interval_ms", int(self.force_exit_check_interval_ms.value()))
         self.cfg.set("force_exit_timeout_seconds", float(self.force_exit_timeout_seconds.value()))

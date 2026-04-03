@@ -253,6 +253,15 @@ function showText(str) {
 }
 const chatPanel = document.getElementById('chat');
 const chatList = chatPanel.querySelector('.chat-list');
+let chatAutoScrollRaf = 0;
+function scheduleChatAutoScroll() {
+  if (chatAutoScrollRaf) return;
+  chatAutoScrollRaf = requestAnimationFrame(() => {
+    chatAutoScrollRaf = 0;
+    if (!chatPanel) return;
+    chatPanel.scrollTop = chatPanel.scrollHeight;
+  });
+}
 let isTTSPlaying = false; // Flag to suppress ASR while speaking
 let ttsQueue = [];
 let isStreaming = false;
@@ -337,9 +346,11 @@ function setMsgContent(el, text, options = null) {
   const highlightText = options && typeof options.highlightText === 'string' ? options.highlightText : '';
   if (highlightText) {
     el.innerHTML = `${renderPlainText(baseText)}<span class="speaking-current">${renderPlainText(highlightText)}</span>`;
+    if (el.isConnected) scheduleChatAutoScroll();
     return;
   }
   el.innerHTML = renderMarkdown(el.dataset.raw);
+  if (el.isConnected) scheduleChatAutoScroll();
 }
 
 function appendMsg(role, text){
@@ -360,6 +371,7 @@ function appendMsg(role, text){
   item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
   setMsgContent(item, text);
   chatList.appendChild(item);
+  scheduleChatAutoScroll();
 }
 
 let ws;
@@ -412,6 +424,7 @@ function ensureAssistantItem() {
   item.className = 'msg assistant streaming';
   item.dataset.raw = '';
   chatList.appendChild(item);
+  scheduleChatAutoScroll();
   currentAssistantItem = item;
   currentAssistantText = '';
   currentAssistantCommittedText = '';
