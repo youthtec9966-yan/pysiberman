@@ -58,7 +58,8 @@ class ConfigManager:
                 "asr_interrupt_peak": 0.085,
                 "asr_interrupt_rms": 0.015,
                 "force_exit_check_interval_ms": 10000,
-                "force_exit_timeout_seconds": 23.6
+                "force_exit_timeout_seconds": 23.6,
+                "single_turn_conversation_enabled": True
             }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load(self):
@@ -101,7 +102,8 @@ class ConfigManager:
                 "asr_interrupt_peak": 0.085,
                 "asr_interrupt_rms": 0.015,
                 "force_exit_check_interval_ms": 10000,
-                "force_exit_timeout_seconds": 23.6
+                "force_exit_timeout_seconds": 23.6,
+                "single_turn_conversation_enabled": True
             }
 
     def save(self):

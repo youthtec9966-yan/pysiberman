@@ -275,6 +275,9 @@ class SettingsDialog(QDialog):
         self.idle_close_wait_seconds.setDecimals(1)
         self.idle_close_wait_seconds.setValue(float(self.cfg.get("idle_close_wait_seconds", 5.0)))
         form.addRow("规则五等待(s)", self.idle_close_wait_seconds)
+        self.single_turn_conversation_enabled = QCheckBox("启用一轮对话")
+        self.single_turn_conversation_enabled.setChecked(bool(self.cfg.get("single_turn_conversation_enabled", True)))
+        form.addRow("一轮对话", self.single_turn_conversation_enabled)
 
         self.audio_match_enabled = QComboBox()
         self.audio_match_enabled.addItem("启用", True)
@@ -420,6 +423,7 @@ class SettingsDialog(QDialog):
         self.cfg.set("force_exit_timeout_seconds", float(self.force_exit_timeout_seconds.value()))
         self.cfg.set("idle_prompt_seconds", float(self.idle_prompt_seconds.value()))
         self.cfg.set("idle_close_wait_seconds", float(self.idle_close_wait_seconds.value()))
+        self.cfg.set("single_turn_conversation_enabled", bool(self.single_turn_conversation_enabled.isChecked()))
         self.cfg.set("audio_match_enabled", self.audio_match_enabled.currentData())
         self.cfg.set("audio_match_threshold", float(self.audio_match_threshold.value()))
         self.cfg.set("interrupt_audio_match_threshold", float(self.interrupt_audio_match_threshold.value()))

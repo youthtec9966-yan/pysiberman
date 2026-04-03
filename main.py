@@ -1002,11 +1002,11 @@ class TrayApp(QApplication):
         normalized = self._normalize_text(text)
         if not normalized:
             return False
-        aliases = ["小石警官", "小石", "警官"]
+        aliases = ("小石警官", "小石", "警官")
+        if any(a in normalized for a in aliases):
+            return True
         suffixes = {"", "啊", "呀", "哎", "诶", "欸", "喂", "在吗", "在嘛", "在不在", "在没在", "出来", "出来下", "出来一下"}
         for alias in aliases:
-            if normalized == alias:
-                return True
             if normalized.startswith(alias):
                 suffix = normalized[len(alias):]
                 if suffix in suffixes or len(suffix) <= 2:
@@ -1291,7 +1291,7 @@ class TrayApp(QApplication):
         except Exception:
             pass
         self._on_log(f"问题已接收并准备回答: {text}")
-        self._set_single_turn_close_pending(True)
+        self._set_single_turn_close_pending(self._is_single_turn_conversation_enabled())
         await self.ask_llm(text)
 
     def _commit_pending_user_input(self):
@@ -1603,6 +1603,9 @@ class TrayApp(QApplication):
         else:
             self.single_turn_close_requested_ts = 0.0
             self.single_turn_close_ready_ts = 0.0
+
+    def _is_single_turn_conversation_enabled(self) -> bool:
+        return bool(self.cfg.get("single_turn_conversation_enabled", True))
 
     def _arm_single_turn_close_delay(self, delay_seconds: float = 1.0):
         if not self._should_close_after_answer():

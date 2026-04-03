@@ -79,6 +79,8 @@ $verifyPaths = @(
     (Join-Path $projectRoot "dist\pySiberMan\pySiberMan.exe"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\porcupine_params_zh.pv"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\sjg_zh_windows_v4_0_0.ppn"),
+    (Join-Path $projectRoot "dist\pySiberMan\_internal\pvporcupine\resources\keyword_files\windows"),
+    (Join-Path $projectRoot "dist\pySiberMan\_internal\pvporcupine\lib\windows\amd64\libpv_porcupine.dll"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\templates\wake"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\templates\interrupt"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\player"),
