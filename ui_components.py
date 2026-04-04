@@ -169,8 +169,8 @@ class SettingsDialog(QDialog):
         w.setLayout(row)
 
         # 定义 LLM 输入框
-        self.llm_base_url = QLineEdit(self.cfg.get("llm_base_url", "https://ark.cn-beijing.volces.com/api/v3"))
-        self.llm_api_key = QLineEdit(self.secrets.get("llm_api_key", "43bdf90d-590e-442e-8f68-5207a88d3052"))
+        self.llm_base_url = QLineEdit(self.cfg.get("llm_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+        self.llm_api_key = QLineEdit(self.secrets.get("llm_api_key", "sk-3b0b4ca3a53a4cf489a5a294eda0aff0"))
         self.llm_api_key.setEchoMode(QLineEdit.Password)
         self.asr_api_key = QLineEdit(self.secrets.get("asr_api_key", self.cfg.get("aliyun_appkey", "sk-3b0b4ca3a53a4cf489a5a294eda0aff0")))
         self.asr_api_key.setEchoMode(QLineEdit.Password)
@@ -178,7 +178,7 @@ class SettingsDialog(QDialog):
         self.porcupine_access_key.setEchoMode(QLineEdit.Password)
         self.kws_enabled = QCheckBox("启用 Porcupine KWS 唤醒")
         self.kws_enabled.setChecked(bool(self.cfg.get("kws_enabled", False)))
-        self.llm_model = QLineEdit(self.cfg.get("llm_model", "doubao-seed-1-6-flash-250828"))
+        self.llm_model = QLineEdit(self.cfg.get("llm_model", "qwen-turbo"))
         default_system_prompt = "你是一位包头公安局石拐分局的数字人民警，负责为群众解答警务、法律方面的问题，你的回答必须专业、诚挚、热情，绝对不能有任何不耐烦，指责意味的回答，为了保证对话的连贯性，回答内容控制在200字以内。注意：你叫“小石警官”或者有时被人误叫成“小时景观”或者其他发音为“xiao shi jin（g） guan”这都是在呼唤你，不要搞错了。"
         self.llm_system_prompt = QPlainTextEdit()
         try:

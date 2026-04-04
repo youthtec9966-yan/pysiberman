@@ -93,8 +93,10 @@ class AudioWakeWorkerASR(QObject):
         
         # 动态降噪相关参数
         self.noise_floor = 0.01  # 初始噪音阈值
+        self.noise_floor_rms = 0.004
         self.vol_history = []     # 音量历史记录
         self.max_vol_history = [] # 最大音量历史记录
+        self.rms_history = []
         self.NOISE_MARGIN = 0.02  # 噪音阈值与语音的差距
         self.HISTORY_SIZE = 1000    # 历史记录大小 (约32秒，每帧32ms)
         self._speaking_state = False
@@ -106,6 +108,8 @@ class AudioWakeWorkerASR(QObject):
         self.speaking_interrupt_rms = 0.015
         self.last_asr_peak = 0.0
         self.last_asr_rms = 0.0
+        self.asr_audio_event_detection_enabled = True
+        self.asr_disfluency_removal_enabled = True
 
     def set_speaking_state(self, speaking: bool):
         self._speaking_state = bool(speaking)
@@ -141,21 +145,34 @@ class AudioWakeWorkerASR(QObject):
 
     def get_vad_snapshot(self):
         avg_max_vol = sum(self.max_vol_history) / len(self.max_vol_history) if self.max_vol_history else 0.0
+        avg_rms = sum(self.rms_history) / len(self.rms_history) if self.rms_history else 0.0
         if self._speaking_state:
-            gate = max(
+            gate_peak = max(
                 self.noise_floor + self.speaking_noise_margin,
-                avg_max_vol * self.speaking_energy_ratio,
+                min(avg_max_vol * self.speaking_energy_ratio, 0.65),
                 self.speaking_interrupt_peak
             )
+            gate_rms = max(
+                self.noise_floor_rms + (self.speaking_noise_margin * 0.35),
+                min(avg_rms * (1.0 + max(0.2, self.speaking_energy_ratio * 0.35)), 0.12),
+                self.speaking_interrupt_rms
+            )
         else:
-            gate = max(
+            gate_peak = max(
                 self.noise_floor + self.standby_noise_margin,
-                avg_max_vol * self.standby_energy_ratio
+                min(avg_max_vol * (1.0 + max(0.05, (self.standby_energy_ratio - 1.0) * 0.6)), 0.55)
+            )
+            gate_rms = max(
+                self.noise_floor_rms + 0.004,
+                min(avg_rms * 1.35, 0.06)
             )
         return {
             "noise_floor": float(self.noise_floor),
+            "noise_floor_rms": float(self.noise_floor_rms),
             "avg_max_vol": float(avg_max_vol),
-            "gate": float(gate),
+            "avg_rms": float(avg_rms),
+            "gate_peak": float(gate_peak),
+            "gate_rms": float(gate_rms),
             "speaking": bool(self._speaking_state)
         }
 
@@ -400,16 +417,24 @@ class AudioWakeWorkerASR(QObject):
     def _update_noise_floor(self, arr):
         """动态更新噪音阈值"""
         current_max = np.max(np.abs(arr))
+        current_rms = float(np.sqrt(np.mean(np.square(arr)))) if len(arr) else 0.0
         
         # 更新音量历史记录
         self.vol_history.append(current_max)
         if len(self.vol_history) > self.HISTORY_SIZE:
             self.vol_history.pop(0)
+        self.rms_history.append(current_rms)
+        if len(self.rms_history) > self.HISTORY_SIZE:
+            self.rms_history.pop(0)
         
         if self.vol_history:
             sorted_hist = sorted(self.vol_history)
             idx = max(0, int(len(sorted_hist) * 0.1) - 1)
             self.noise_floor = sorted_hist[idx] * 1.15
+        if self.rms_history:
+            sorted_rms = sorted(self.rms_history)
+            idx_rms = max(0, int(len(sorted_rms) * 0.2) - 1)
+            self.noise_floor_rms = sorted_rms[idx_rms] * 1.25
 
     def _is_speech(self, arr):
         """判断是否有语音（基于动态噪音阈值）"""
@@ -423,15 +448,29 @@ class AudioWakeWorkerASR(QObject):
         
         # 计算平均最大音量
         avg_max_vol = sum(self.max_vol_history) / len(self.max_vol_history) if self.max_vol_history else 0
+        avg_rms = sum(self.rms_history) / len(self.rms_history) if self.rms_history else 0.0
 
         if self._speaking_state:
-            dynamic_gate = max(
+            dynamic_gate_peak = max(
                 self.noise_floor + self.speaking_noise_margin,
-                avg_max_vol * self.speaking_energy_ratio,
+                min(avg_max_vol * self.speaking_energy_ratio, 0.65),
                 self.speaking_interrupt_peak
             )
-            return current_max > dynamic_gate and current_rms > self.speaking_interrupt_rms
-        return current_max > (self.noise_floor + self.standby_noise_margin) and current_max > (avg_max_vol * self.standby_energy_ratio)
+            dynamic_gate_rms = max(
+                self.noise_floor_rms + (self.speaking_noise_margin * 0.35),
+                min(avg_rms * (1.0 + max(0.2, self.speaking_energy_ratio * 0.35)), 0.12),
+                self.speaking_interrupt_rms
+            )
+            return current_max > dynamic_gate_peak and current_rms > dynamic_gate_rms
+        standby_peak_gate = max(
+            self.noise_floor + self.standby_noise_margin,
+            min(avg_max_vol * (1.0 + max(0.05, (self.standby_energy_ratio - 1.0) * 0.6)), 0.55)
+        )
+        standby_rms_gate = max(
+            self.noise_floor_rms + 0.004,
+            min(avg_rms * 1.35, 0.06)
+        )
+        return current_max > standby_peak_gate and current_rms > standby_rms_gate
 
     def _process_asr(self, pcm_data):
         """处理累积的语音数据进行识别"""
@@ -468,7 +507,11 @@ class AudioWakeWorkerASR(QObject):
             
             # 调用识别API
             t_api_begin = time.monotonic()
-            result = recognition.call(file=temp_filename)
+            result = recognition.call(
+                file=temp_filename,
+                audio_event_detection_enabled=self.asr_audio_event_detection_enabled,
+                disfluency_removal_enabled=self.asr_disfluency_removal_enabled
+            )
             t_api_ms = (time.monotonic() - t_api_begin) * 1000.0
             
             # 3. 解析识别结果

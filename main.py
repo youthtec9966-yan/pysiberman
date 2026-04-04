@@ -173,7 +173,7 @@ class TrayApp(QApplication):
         self.pending_user_text = None
         self.manual_command_armed_until_ts = 0.0
         self.manual_command_timeout_seconds = 12.0
-        self.user_input_debounce_ms = 700
+        self.user_input_debounce_ms = 420
         self.user_input_timer = QTimer(self)
         self.user_input_timer.setSingleShot(True)
         self.user_input_timer.timeout.connect(self._commit_pending_user_input)
@@ -1190,29 +1190,53 @@ class TrayApp(QApplication):
             return True
         return False
 
+    def _heuristic_is_clearly_valid_user_input(self, text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        clean = "".join(c for c in raw if c.isalnum() or '\u4e00' <= c <= '\u9fff')
+        if len(clean) < 4:
+            return False
+        if any(x in raw for x in ["？", "?", "请问", "麻烦", "帮我", "咨询", "怎么", "如何", "为什么", "咋", "怎么办"]):
+            return True
+        if any(x in raw for x in ["我要", "我想", "帮忙", "求助", "报案", "报警", "立案", "办理", "查询"]):
+            return True
+        domain_hits = 0
+        for k in ["小石", "警官", "派出所", "身份证", "户口", "居住证", "驾驶证", "驾照", "车辆", "违章", "诈骗", "被骗", "转账", "银行卡", "微信", "法律", "违法", "案子"]:
+            if k in raw:
+                domain_hits += 1
+        if domain_hits >= 2:
+            return True
+        return len(clean) >= 14 and domain_hits >= 1
+
     async def _llm_gate_user_input(self, text: str) -> str:
         text = self._normalize_text(text)
         base_url = self.cfg.get("llm_base_url", "")
         api_key = self.secrets.get("llm_api_key", "")
         model = self.cfg.get("llm_model", "")
         if not base_url or not api_key or not model:
-            return "__OK__"
+            return "__ASK__"
         try:
             client = AsyncOpenAI(base_url=base_url, api_key=api_key)
             system_prompt = (
-                "你是语音输入过滤器。你只能输出两种结果之一：__IGNORE__ 或 __OK__。\n"
-                "当输入明显是环境里别人聊天的片段、无对象的碎句、口头禅/语气词、无法形成提问或求助的内容时，输出 __IGNORE__。\n"
-                "当输入是在向“小石警官/警官”提问、求助、咨询、办理业务、报警报案，或包含明确问题/指令时，输出 __OK__。\n"
-                "不要输出任何其他字符。"
+                "你是数字人入口判定与直答助手。先判断这句ASR文本是否是用户在向民警服务人员发起有效提问/求助。\n"
+                "若是环境噪声、旁人闲聊、无对象碎句、语气词、无意义口头禅，输出 __IGNORE__。\n"
+                "若是有效提问/求助，则直接给出最终回答，不要输出 __OK__、不要解释你在判定。\n"
+                "回答要求：专业、诚挚、热情，中文，简洁，控制在200字以内。"
             )
+            messages = [{"role": "system", "content": system_prompt}]
+            try:
+                for msg in self.chat_history[-8:]:
+                    if msg.get("role") in ("user", "assistant"):
+                        messages.append({"role": msg["role"], "content": msg["content"]})
+            except Exception:
+                pass
+            messages.append({"role": "user", "content": text})
             resp = await client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
-                max_tokens=4,
-                temperature=0,
+                messages=messages,
+                max_tokens=420,
+                temperature=0.2,
                 stream=False,
             )
             out = ""
@@ -1220,13 +1244,13 @@ class TrayApp(QApplication):
                 out = (resp.choices[0].message.content or "").strip()
             except Exception:
                 out = ""
+            if not out:
+                return "__ASK__"
             if out.startswith("__IGNORE__"):
                 return "__IGNORE__"
-            if out.startswith("__OK__"):
-                return "__OK__"
         except Exception:
-            return "__OK__"
-        return "__OK__"
+            return "__ASK__"
+        return out
 
     async def _process_committed_user_input(self, text: str):
         if self._is_manual_command_active():
@@ -1269,7 +1293,20 @@ class TrayApp(QApplication):
             self._to_chat_idle_mode("问题无效-规则八过滤")
             self._on_log(f"问题判定无效: {text}")
             return
-        verdict = await self._llm_gate_user_input(text)
+        if self._heuristic_is_clearly_valid_user_input(text):
+            verdict = "__ASK__"
+            direct_answer = ""
+        else:
+            llm_result = await self._llm_gate_user_input(text)
+            if llm_result == "__IGNORE__":
+                verdict = "__IGNORE__"
+                direct_answer = ""
+            elif llm_result == "__ASK__":
+                verdict = "__ASK__"
+                direct_answer = ""
+            else:
+                verdict = "__DIRECT_ANSWER__"
+                direct_answer = llm_result.strip()
         if verdict == "__IGNORE__":
             self.awaiting_response = False
             self._awaiting_tts_start = False
@@ -1283,6 +1320,41 @@ class TrayApp(QApplication):
             self._to_chat_idle_mode("问题无效-LLM过滤")
             self._on_log(f"问题判定无效(LLM): {text}")
             return
+        if verdict == "__DIRECT_ANSWER__":
+            answer_text = (direct_answer or "").strip()
+            if not answer_text:
+                verdict = "__ASK__"
+            else:
+                self._note_activity()
+                self.force_exit_watch_started_ts = time.time()
+                self._to_speaking_mode("规则二-LLM判定有效并直答")
+                try:
+                    self.ws_broadcast({"type": "USER_INPUT_CONFIRM", "text": text})
+                except Exception:
+                    pass
+                self._on_log(f"问题已接收并由入口LLM直答: {text}")
+                self._set_single_turn_close_pending(self._is_single_turn_conversation_enabled())
+                try:
+                    self.chat_history.append({"role": "user", "content": text})
+                except Exception:
+                    pass
+                try:
+                    self.chat_history.append({"role": "assistant", "content": answer_text})
+                except Exception:
+                    pass
+                try:
+                    self.ws_broadcast({"type": "CHAT_APPEND", "role": "assistant", "text": answer_text})
+                except Exception:
+                    pass
+                if answer_text:
+                    self._mark_successful_response(answer_text)
+                self.awaiting_response = False
+                if answer_text and self.ws_clients:
+                    self._enter_waiting_tts_start("入口LLM直答-等待TTS启动")
+                else:
+                    self._set_single_turn_close_pending(False)
+                    self._to_chat_idle_mode("入口LLM直答完成")
+                return
         self.awaiting_response = True
         self._note_activity()
         self.force_exit_watch_started_ts = time.time()
