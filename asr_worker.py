@@ -9,7 +9,6 @@ import wave
 import faulthandler
 import numpy as np
 from dashscope.audio.asr import Recognition, RecognitionCallback
-import pvporcupine
 from pvrecorder import PvRecorder
 from PySide6.QtCore import QObject, Signal
 
@@ -67,10 +66,19 @@ class AudioWakeWorkerASR(QObject):
         self.interrupt_audio_standby_rms_gate = 0.006
         kws_config = kws_config or {}
         self.kws_enabled = bool(kws_config.get("enabled", False))
-        self.kws_access_key = str(kws_config.get("access_key", "") or "").strip()
-        self.kws_keyword_path = str(kws_config.get("keyword_path", "") or "").strip()
-        self.kws_model_path = str(kws_config.get("model_path", "") or "").strip()
-        self.kws_sensitivity = float(kws_config.get("sensitivity", 0.7))
+        self.kws_provider = str(kws_config.get("provider", "sherpa") or "sherpa").strip().lower()
+        if self.kws_provider != "sherpa":
+            self.kws_provider = "sherpa"
+        self.sherpa_model_dir = str(kws_config.get("sherpa_model_dir", "") or "").strip()
+        self.sherpa_tokens_path = str(kws_config.get("sherpa_tokens_path", "") or "").strip()
+        self.sherpa_encoder_path = str(kws_config.get("sherpa_encoder_path", "") or "").strip()
+        self.sherpa_decoder_path = str(kws_config.get("sherpa_decoder_path", "") or "").strip()
+        self.sherpa_joiner_path = str(kws_config.get("sherpa_joiner_path", "") or "").strip()
+        self.sherpa_keywords_file = str(kws_config.get("sherpa_keywords_file", "") or "").strip()
+        self.sherpa_num_threads = int(kws_config.get("sherpa_num_threads", 4))
+        self.sherpa_keywords_score = float(kws_config.get("sherpa_keywords_score", 1.5))
+        self.sherpa_keywords_threshold = float(kws_config.get("sherpa_keywords_threshold", 0.1))
+        self.sherpa_max_active_paths = int(kws_config.get("sherpa_max_active_paths", 8))
         self.kws_interrupt_fallback_enabled = bool(kws_config.get("interrupt_fallback_enabled", True))
         self.kws_interrupt_cooldown_ms = float(kws_config.get("interrupt_cooldown_ms", 800.0))
         self.kws_interrupt_cooldown_ms = min(5000.0, max(100.0, self.kws_interrupt_cooldown_ms))
@@ -82,7 +90,7 @@ class AudioWakeWorkerASR(QObject):
         self._paused = False
         self._mode = "wake"
         self._thread = None
-        self._asr_enabled = True
+        self._asr_enabled = not self.kws_enabled
         self._wake_listener_enabled = True
         self._interrupt_listener_enabled = False
         self._interrupt_audio_enabled = True
@@ -108,8 +116,6 @@ class AudioWakeWorkerASR(QObject):
         self.speaking_interrupt_rms = 0.015
         self.last_asr_peak = 0.0
         self.last_asr_rms = 0.0
-        self.asr_audio_event_detection_enabled = True
-        self.asr_disfluency_removal_enabled = True
 
     def set_speaking_state(self, speaking: bool):
         self._speaking_state = bool(speaking)
@@ -185,7 +191,10 @@ class AudioWakeWorkerASR(QObject):
             # 但具体的暂停控制交给上层逻辑调用 resume() 更安全
 
     def set_asr_enabled(self, enabled: bool):
-        self._asr_enabled = bool(enabled)
+        target = bool(enabled)
+        if target and self.kws_enabled and self._mode == "wake" and self._wake_listener_enabled:
+            target = False
+        self._asr_enabled = target
         self.log.emit(f"ASR enabled={self._asr_enabled}")
 
     def set_wake_listener_enabled(self, enabled: bool):
@@ -209,35 +218,71 @@ class AudioWakeWorkerASR(QObject):
 
     def _activate_asr_wake_fallback(self, reason: str):
         self._kws_ready = False
-        if self._mode == "wake" and self._wake_listener_enabled and not self._asr_enabled:
+        can_enable_asr_wake = (not self.kws_enabled) and self._mode == "wake" and self._wake_listener_enabled
+        if can_enable_asr_wake and not self._asr_enabled:
             self._asr_enabled = True
             self.log.emit("ASR enabled=True")
         if not self._kws_fallback_active:
             self._kws_fallback_active = True
-            self.log.emit(f"KWS fallback active: {reason}")
+            if can_enable_asr_wake:
+                self.log.emit(f"KWS fallback active: {reason}")
+            else:
+                self.log.emit(f"KWS unavailable: {reason}")
 
-    def _mask_kws_key(self) -> str:
-        key = str(self.kws_access_key or "")
-        if not key:
-            return "<empty>"
-        if len(key) <= 12:
-            return key[0:2] + "***" + key[-2:]
-        return key[0:6] + "***" + key[-6:]
+    def _resolve_sherpa_file(self, base_dir: str, configured_path: str, default_name: str) -> str:
+        candidate = str(configured_path or "").strip()
+        if candidate and os.path.isabs(candidate) and os.path.exists(candidate):
+            return candidate
+        if candidate:
+            if base_dir:
+                p = os.path.join(base_dir, candidate)
+                if os.path.exists(p):
+                    return p
+            if os.path.exists(candidate):
+                return candidate
+        if base_dir:
+            p = os.path.join(base_dir, default_name)
+            if os.path.exists(p):
+                return p
+        return candidate or (os.path.join(base_dir, default_name) if base_dir else default_name)
 
-    def _kws_init_hint(self, e: Exception) -> str:
-        if isinstance(e, pvporcupine.PorcupineActivationLimitError):
-            return "AccessKey已达激活上限，请在Picovoice控制台释放旧设备或更换新Key"
-        if isinstance(e, pvporcupine.PorcupineActivationRefusedError):
-            return "AccessKey被拒绝，请检查Key是否有效且具备Porcupine权限"
-        if isinstance(e, pvporcupine.PorcupineActivationThrottledError):
-            return "AccessKey触发限流，请稍后重试"
-        if isinstance(e, pvporcupine.PorcupineKeyError):
-            return "AccessKey格式无效，请检查是否复制完整"
-        if isinstance(e, pvporcupine.PorcupineInvalidArgumentError):
-            return "模型参数无效，请检查keyword/model文件是否匹配当前SDK"
-        if isinstance(e, pvporcupine.PorcupineIOError):
-            return "模型文件读取失败，请检查文件路径与访问权限"
-        return "请检查AccessKey状态、模型文件与网络环境"
+    def _create_sherpa_kws(self):
+        try:
+            import sherpa_onnx
+        except Exception as e:
+            raise RuntimeError(f"sherpa_onnx 不可用: {e}")
+        base_dir = str(self.sherpa_model_dir or "").strip()
+        if base_dir and (not os.path.isabs(base_dir)):
+            alt1 = os.path.abspath(base_dir)
+            alt2 = os.path.join(os.getcwd(), base_dir)
+            if os.path.isdir(alt1):
+                base_dir = alt1
+            elif os.path.isdir(alt2):
+                base_dir = alt2
+        if not base_dir:
+            base_dir = os.path.join(os.getcwd(), "sherpa")
+        tokens = self._resolve_sherpa_file(base_dir, self.sherpa_tokens_path, "tokens.txt")
+        encoder = self._resolve_sherpa_file(base_dir, self.sherpa_encoder_path, "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        decoder = self._resolve_sherpa_file(base_dir, self.sherpa_decoder_path, "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        joiner = self._resolve_sherpa_file(base_dir, self.sherpa_joiner_path, "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        keywords_file = self._resolve_sherpa_file(base_dir, self.sherpa_keywords_file, "keywords.txt")
+        required = [tokens, encoder, decoder, joiner, keywords_file]
+        missing = [p for p in required if not p or (not os.path.exists(p))]
+        if missing:
+            raise RuntimeError(f"sherpa 文件缺失: {missing}")
+        kws = sherpa_onnx.KeywordSpotter(
+            tokens=tokens,
+            encoder=encoder,
+            decoder=decoder,
+            joiner=joiner,
+            keywords_file=keywords_file,
+            num_threads=max(1, int(self.sherpa_num_threads)),
+            keywords_score=float(self.sherpa_keywords_score),
+            keywords_threshold=float(self.sherpa_keywords_threshold),
+            max_active_paths=max(1, int(self.sherpa_max_active_paths)),
+        )
+        stream = kws.create_stream()
+        return kws, stream
             
     def reload_audio_templates(self):
         if self.wake_matcher:
@@ -507,11 +552,7 @@ class AudioWakeWorkerASR(QObject):
             
             # 调用识别API
             t_api_begin = time.monotonic()
-            result = recognition.call(
-                file=temp_filename,
-                audio_event_detection_enabled=self.asr_audio_event_detection_enabled,
-                disfluency_removal_enabled=self.asr_disfluency_removal_enabled
-            )
+            result = recognition.call(file=temp_filename)
             t_api_ms = (time.monotonic() - t_api_begin) * 1000.0
             
             # 3. 解析识别结果
@@ -592,34 +633,26 @@ class AudioWakeWorkerASR(QObject):
     def _run(self):
         """后台线程主逻辑 - 基于 VAD 的动态分段"""
         recorder = None
-        porcupine = None
+        sherpa_kws = None
+        sherpa_stream = None
         try:
             faulthandler.enable()
             self.log.emit("asr engine ready")
-            if self.kws_enabled and self.kws_access_key and self.kws_keyword_path and self.kws_model_path:
-                try:
-                    porcupine = pvporcupine.create(
-                        access_key=self.kws_access_key,
-                        keyword_paths=[self.kws_keyword_path],
-                        model_path=self.kws_model_path,
-                        sensitivities=[self.kws_sensitivity]
-                    )
-                    self._kws_ready = True
-                    self._kws_fallback_active = False
-                    self.log.emit("kws engine ready")
-                except Exception as e:
-                    porcupine = None
-                    keyword_exists = bool(self.kws_keyword_path and os.path.exists(self.kws_keyword_path))
-                    model_exists = bool(self.kws_model_path and os.path.exists(self.kws_model_path))
-                    hint = self._kws_init_hint(e)
-                    self.error.emit(
-                        f"KWS init failed[{type(e).__name__}]: {e} | hint={hint} | "
-                        f"key={self._mask_kws_key()} keyword_exists={keyword_exists} model_exists={model_exists}"
-                    )
-                    self._activate_asr_wake_fallback("kws init failed")
-            elif self.kws_enabled:
-                self.error.emit("KWS init failed: missing access_key/keyword_path/model_path")
-                self._activate_asr_wake_fallback("kws config missing")
+            if self.kws_enabled:
+                if self.kws_provider == "sherpa":
+                    try:
+                        sherpa_kws, sherpa_stream = self._create_sherpa_kws()
+                        self._kws_ready = True
+                        self._kws_fallback_active = False
+                        self.log.emit("kws engine ready (sherpa)")
+                    except Exception as e:
+                        sherpa_kws = None
+                        sherpa_stream = None
+                        self.error.emit(f"KWS init failed[sherpa]: {e}")
+                        self._activate_asr_wake_fallback("sherpa init failed")
+                else:
+                    self.error.emit(f"KWS init failed: unsupported provider={self.kws_provider}")
+                    self._activate_asr_wake_fallback("kws provider unsupported")
             else:
                 self._kws_ready = False
                 self._kws_fallback_active = False
@@ -653,7 +686,7 @@ class AudioWakeWorkerASR(QObject):
             
             while self._running:
                 try:
-                    if self._mode == "wake" and self._wake_listener_enabled and (not self._kws_ready) and (not porcupine) and (not self._asr_enabled):
+                    if self._mode == "wake" and self._wake_listener_enabled and (not self._kws_ready) and (not sherpa_kws) and (not self._asr_enabled):
                         self._activate_asr_wake_fallback("kws unavailable while wake mode")
                     pcm = recorder.read()
                     mic_error_count = 0
@@ -667,9 +700,21 @@ class AudioWakeWorkerASR(QObject):
                     
                     if not pcm:
                         continue
-                    if porcupine:
-                        keyword_index = porcupine.process(pcm)
-                        if keyword_index >= 0:
+                    if sherpa_kws and sherpa_stream:
+                        samples = np.array(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                        sherpa_stream.accept_waveform(16000, samples)
+                        kws_hit = False
+                        while sherpa_kws.is_ready(sherpa_stream):
+                            sherpa_kws.decode_stream(sherpa_stream)
+                            result = str(sherpa_kws.get_result(sherpa_stream) or "").strip()
+                            if result:
+                                kws_hit = True
+                                break
+                        if kws_hit:
+                            try:
+                                sherpa_kws.reset_stream(sherpa_stream)
+                            except Exception:
+                                pass
                             now_ts = time.monotonic()
                             if self._mode == "wake" and self._wake_listener_enabled:
                                 self.log.emit("KWS Wake Match: hit")
@@ -682,8 +727,6 @@ class AudioWakeWorkerASR(QObject):
                                 continue
                             should_kws_interrupt = (
                                 self.kws_interrupt_fallback_enabled
-                                and self.audio_command_interrupt_enabled
-                                and self._interrupt_audio_enabled
                                 and (self._speaking_state or self._interrupt_listener_enabled)
                             )
                             if should_kws_interrupt and (now_ts - last_interrupt_ts) > kws_interrupt_cooldown_sec:
@@ -816,11 +859,6 @@ class AudioWakeWorkerASR(QObject):
             self.error.emit(f"Worker Exception: {str(e)}")
         finally:
             self._release_recorder(recorder)
-            if porcupine is not None:
-                try:
-                    porcupine.delete()
-                except Exception:
-                    pass
             import gc
             gc.collect()
             self.log.emit("wake listening stopped")

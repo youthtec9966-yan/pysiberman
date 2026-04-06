@@ -174,10 +174,10 @@ class SettingsDialog(QDialog):
         self.llm_api_key.setEchoMode(QLineEdit.Password)
         self.asr_api_key = QLineEdit(self.secrets.get("asr_api_key", self.cfg.get("aliyun_appkey", "sk-3b0b4ca3a53a4cf489a5a294eda0aff0")))
         self.asr_api_key.setEchoMode(QLineEdit.Password)
-        self.porcupine_access_key = QLineEdit(self.secrets.get("porcupine_access_key", self.cfg.get("porcupine_access_key", "")))
-        self.porcupine_access_key.setEchoMode(QLineEdit.Password)
-        self.kws_enabled = QCheckBox("启用 Porcupine KWS 唤醒")
-        self.kws_enabled.setChecked(bool(self.cfg.get("kws_enabled", False)))
+        self.kws_enabled = QCheckBox("启用 KWS 唤醒")
+        self.kws_enabled.setChecked(bool(self.cfg.get("kws_enabled", True)))
+        self.sherpa_model_dir = QLineEdit(str(self.cfg.get("sherpa_model_dir", "./sherpa") or "").strip())
+        self.sherpa_keywords_file = QLineEdit(str(self.cfg.get("sherpa_keywords_file", "keywords.txt") or "").strip())
         self.llm_model = QLineEdit(self.cfg.get("llm_model", "qwen-turbo"))
         default_system_prompt = "你是一位包头公安局石拐分局的数字人民警，负责为群众解答警务、法律方面的问题，你的回答必须专业、诚挚、热情，绝对不能有任何不耐烦，指责意味的回答，为了保证对话的连贯性，回答内容控制在200字以内。注意：你叫“小石警官”或者有时被人误叫成“小时景观”或者其他发音为“xiao shi jin（g） guan”这都是在呼唤你，不要搞错了。"
         self.llm_system_prompt = QPlainTextEdit()
@@ -242,7 +242,8 @@ class SettingsDialog(QDialog):
         form.addRow("LLM 模型", self.llm_model)
         form.addRow("ASR API Key", self.asr_api_key)
         form.addRow("KWS 唤醒", self.kws_enabled)
-        form.addRow("Porcupine AccessKey", self.porcupine_access_key)
+        form.addRow("Sherpa 模型目录", self.sherpa_model_dir)
+        form.addRow("Sherpa 关键词文件", self.sherpa_keywords_file)
         form.addRow("补充提示词", self.llm_system_prompt)
         form.addRow("唤醒开场白", self.wake_intro_text)
         form.addRow("TTS 模型", self.tts_model)
@@ -451,20 +452,24 @@ class SettingsDialog(QDialog):
         asr_api_key = self.asr_api_key.text().strip()
         self.cfg.set("aliyun_appkey", asr_api_key)
         self.cfg.set("kws_enabled", bool(self.kws_enabled.isChecked()))
-        self.cfg.set("porcupine_access_key", self.porcupine_access_key.text().strip())
+        self.cfg.set("kws_provider", "sherpa")
+        self.cfg.set("sherpa_model_dir", self.sherpa_model_dir.text().strip())
+        self.cfg.set("sherpa_keywords_file", self.sherpa_keywords_file.text().strip())
         self.cfg.save()
         self.secrets.set("llm_api_key", self.llm_api_key.text())
         self.secrets.set("asr_api_key", asr_api_key)
-        self.secrets.set("porcupine_access_key", self.porcupine_access_key.text().strip())
         self.accept()
 
     def _update_kws_controls(self, enabled: bool):
         enabled = bool(enabled)
-        self.porcupine_access_key.setEnabled(enabled)
+        self.sherpa_model_dir.setEnabled(enabled)
+        self.sherpa_keywords_file.setEnabled(enabled)
         if enabled:
-            self.porcupine_access_key.setPlaceholderText("启用 KWS 后请输入 Porcupine AccessKey")
+            self.sherpa_model_dir.setPlaceholderText("例如：./sherpa")
+            self.sherpa_keywords_file.setPlaceholderText("例如：keywords.txt")
         else:
-            self.porcupine_access_key.setPlaceholderText("KWS 关闭时无需填写 AccessKey")
+            self.sherpa_model_dir.setPlaceholderText("仅 Sherpa-ONNX 引擎使用")
+            self.sherpa_keywords_file.setPlaceholderText("仅 Sherpa-ONNX 引擎使用")
 
     def _interrupt_runtime_config(self):
         return {

@@ -34,9 +34,7 @@ $requiredFiles = @(
     $specFile,
     $issFile,
     $mainPy,
-    $asrPy,
-    (Join-Path $projectRoot "porcupine_params_zh.pv"),
-    (Join-Path $projectRoot "sjg_zh_windows_v4_0_0.ppn")
+    $asrPy
 )
 
 foreach ($file in $requiredFiles) {
@@ -73,7 +71,7 @@ if (-not $SkipClean) {
 Write-Host "[1/6] 依赖导入自检"
 Invoke-Checked -Name "依赖导入自检" -FilePath $pythonExe -Arguments @(
     "-c",
-    "import dashscope,openai,websockets,pvrecorder,pvporcupine,python_speech_features,fastdtw,scipy"
+    "import dashscope,openai,websockets,pvrecorder,python_speech_features,fastdtw,scipy; import importlib.util; print('sherpa_onnx=' + ('ok' if importlib.util.find_spec('sherpa_onnx') else 'missing'))"
 )
 
 Write-Host "[2/6] 语法检查 main.py / asr_worker.py"
@@ -88,13 +86,10 @@ if (-not $SkipPyInstaller) {
 
 $verifyPaths = @(
     (Join-Path $projectRoot "dist\pySiberMan\pySiberMan.exe"),
-    (Join-Path $projectRoot "dist\pySiberMan\_internal\porcupine_params_zh.pv"),
-    (Join-Path $projectRoot "dist\pySiberMan\_internal\sjg_zh_windows_v4_0_0.ppn"),
-    (Join-Path $projectRoot "dist\pySiberMan\_internal\pvporcupine\resources\keyword_files\windows"),
-    (Join-Path $projectRoot "dist\pySiberMan\_internal\pvporcupine\lib\windows\amd64\libpv_porcupine.dll"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\templates\wake"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\templates\interrupt"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\player"),
+    (Join-Path $projectRoot "dist\pySiberMan\_internal\sherpa\keywords.txt"),
     (Join-Path $projectRoot "dist\pySiberMan\_internal\pvrecorder\lib\windows\amd64\libpv_recorder.dll")
 )
 

@@ -318,15 +318,25 @@ class TrayApp(QApplication):
             self.worker.reload_audio_templates()
 
     def _is_kws_enabled(self) -> bool:
-        return bool(self.cfg.get("kws_enabled", False))
+        return bool(self.cfg.get("kws_enabled", True))
 
     def _get_kws_runtime_signature(self):
+        provider = str(self.cfg.get("kws_provider", "sherpa") or "sherpa").strip().lower()
+        if provider != "sherpa":
+            provider = "sherpa"
         return (
             self._is_kws_enabled(),
-            str(self.secrets.get("porcupine_access_key", self.cfg.get("porcupine_access_key", "")) or "").strip(),
-            str(self.cfg.get("porcupine_keyword_path", "./sjg_zh_windows_v4_0_0.ppn") or "").strip(),
-            str(self.cfg.get("porcupine_model_path", "./porcupine_params_zh.pv") or "").strip(),
-            float(self.cfg.get("porcupine_sensitivity", 0.7) or 0.7),
+            provider,
+            str(self.cfg.get("sherpa_model_dir", "./sherpa") or "").strip(),
+            str(self.cfg.get("sherpa_keywords_file", "keywords.txt") or "").strip(),
+            str(self.cfg.get("sherpa_tokens_path", "tokens.txt") or "").strip(),
+            str(self.cfg.get("sherpa_encoder_path", "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx") or "").strip(),
+            str(self.cfg.get("sherpa_decoder_path", "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx") or "").strip(),
+            str(self.cfg.get("sherpa_joiner_path", "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx") or "").strip(),
+            int(self.cfg.get("sherpa_num_threads", 4) or 4),
+            float(self.cfg.get("sherpa_keywords_score", 1.5) or 1.5),
+            float(self.cfg.get("sherpa_keywords_threshold", 0.1) or 0.1),
+            int(self.cfg.get("sherpa_max_active_paths", 8) or 8),
         )
 
     def _refresh_wake_audio_manager_action(self):
@@ -431,51 +441,50 @@ class TrayApp(QApplication):
         }
 
     def _get_kws_config_from_config(self):
-        enabled = bool(self.cfg.get("kws_enabled", False))
-        raw_access_key = self.cfg.get("porcupine_access_key", "")
-        raw_keyword_path = self.cfg.get("porcupine_keyword_path", "./sjg_zh_windows_v4_0_0.ppn")
-        raw_model_path = self.cfg.get("porcupine_model_path", "./porcupine_params_zh.pv")
-        raw_sensitivity = self.cfg.get("porcupine_sensitivity", 0.7)
+        enabled = bool(self.cfg.get("kws_enabled", True))
+        provider = str(self.cfg.get("kws_provider", "sherpa") or "sherpa").strip().lower()
+        if provider != "sherpa":
+            provider = "sherpa"
+        raw_sherpa_model_dir = self.cfg.get("sherpa_model_dir", "./sherpa")
+        raw_sherpa_tokens_path = self.cfg.get("sherpa_tokens_path", "tokens.txt")
+        raw_sherpa_encoder_path = self.cfg.get("sherpa_encoder_path", "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        raw_sherpa_decoder_path = self.cfg.get("sherpa_decoder_path", "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        raw_sherpa_joiner_path = self.cfg.get("sherpa_joiner_path", "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx")
+        raw_sherpa_keywords_file = self.cfg.get("sherpa_keywords_file", "keywords.txt")
+        raw_sherpa_num_threads = self.cfg.get("sherpa_num_threads", 4)
+        raw_sherpa_keywords_score = self.cfg.get("sherpa_keywords_score", 1.5)
+        raw_sherpa_keywords_threshold = self.cfg.get("sherpa_keywords_threshold", 0.1)
+        raw_sherpa_max_active_paths = self.cfg.get("sherpa_max_active_paths", 8)
         raw_interrupt_fallback_enabled = self.cfg.get("kws_interrupt_fallback_enabled", True)
         raw_interrupt_cooldown_ms = self.cfg.get("kws_interrupt_cooldown_ms", self.cfg.get("interrupt_audio_cooldown_ms", 800))
-        access_key = str(raw_access_key or "").strip()
-        keyword_path = str(raw_keyword_path or "").strip()
-        model_path = str(raw_model_path or "").strip()
+        sherpa_model_dir = str(raw_sherpa_model_dir or "").strip()
+        sherpa_tokens_path = str(raw_sherpa_tokens_path or "").strip()
+        sherpa_encoder_path = str(raw_sherpa_encoder_path or "").strip()
+        sherpa_decoder_path = str(raw_sherpa_decoder_path or "").strip()
+        sherpa_joiner_path = str(raw_sherpa_joiner_path or "").strip()
+        sherpa_keywords_file = str(raw_sherpa_keywords_file or "").strip()
         interrupt_fallback_enabled = bool(raw_interrupt_fallback_enabled)
         try:
             interrupt_cooldown_ms = float(raw_interrupt_cooldown_ms if raw_interrupt_cooldown_ms is not None else 800.0)
         except Exception:
             interrupt_cooldown_ms = 800.0
-        secret_access_key = str(self.secrets.get("porcupine_access_key", "") or "").strip()
-        env_access_key = str(os.getenv("PICOVOICE_ACCESS_KEY", "") or "").strip()
-        env_access_key_alt = str(os.getenv("PORCUPINE_ACCESS_KEY", "") or "").strip()
         try:
-            sensitivity = float(raw_sensitivity if raw_sensitivity is not None else 0.7)
+            sherpa_num_threads = int(raw_sherpa_num_threads if raw_sherpa_num_threads is not None else 4)
         except Exception:
-            sensitivity = 0.7
-        def _is_probably_path(v: str) -> bool:
-            if not v:
-                return False
-            s = str(v).strip().lower()
-            if s.endswith(".ppn") or s.endswith(".pv") or s.endswith(".wav"):
-                return True
-            if "\\" in s:
-                return True
-            if s.startswith("./") or s.startswith("../") or s.startswith("models/"):
-                return True
-            if s.startswith("."):
-                return True
-            if len(s) >= 2 and s[1] == ":":
-                return True
-            return False
-        def _is_probably_key(v: str) -> bool:
-            if not v:
-                return False
-            s = str(v).strip()
-            if _is_probably_path(s):
-                return False
-            return len(s) >= 24
-        def _resolve_kws_path(v: str, fallback_name: str) -> str:
+            sherpa_num_threads = 4
+        try:
+            sherpa_keywords_score = float(raw_sherpa_keywords_score if raw_sherpa_keywords_score is not None else 1.5)
+        except Exception:
+            sherpa_keywords_score = 1.5
+        try:
+            sherpa_keywords_threshold = float(raw_sherpa_keywords_threshold if raw_sherpa_keywords_threshold is not None else 0.1)
+        except Exception:
+            sherpa_keywords_threshold = 0.1
+        try:
+            sherpa_max_active_paths = int(raw_sherpa_max_active_paths if raw_sherpa_max_active_paths is not None else 8)
+        except Exception:
+            sherpa_max_active_paths = 8
+        def _resolve_kws_dir(v: str, fallback_name: str) -> str:
             s = str(v or "").strip()
             candidate = s or fallback_name
             p = Path(candidate)
@@ -494,61 +503,20 @@ class TrayApp(QApplication):
             except Exception:
                 pass
             return candidate
-        for candidate in [env_access_key, env_access_key_alt, secret_access_key, access_key]:
-            if _is_probably_key(candidate):
-                access_key = str(candidate).strip()
-                break
-        missing_any = (not access_key) or (not keyword_path) or (not model_path)
-        access_invalid = _is_probably_path(access_key) or (not _is_probably_key(access_key))
-        if missing_any or access_invalid:
-            try:
-                import wakeup as wakeup_cfg
-                wk = str(getattr(wakeup_cfg, "ACCESS_KEY", "") or "").strip()
-                wp = str(getattr(wakeup_cfg, "KEYWORD_PATH", "") or "").strip()
-                wm = str(getattr(wakeup_cfg, "MODEL_PATH", "") or "").strip()
-                ws = getattr(wakeup_cfg, "SENSITIVITY", sensitivity)
-                if _is_probably_key(wk):
-                    access_key = wk
-                if wp:
-                    keyword_path = wp
-                if wm:
-                    model_path = wm
-                try:
-                    sensitivity = float(ws if ws is not None else sensitivity)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        swapped = False
-        if _is_probably_path(access_key) and _is_probably_key(keyword_path):
-            access_key, keyword_path = keyword_path, access_key
-            swapped = True
-        if _is_probably_path(access_key) and _is_probably_key(model_path):
-            access_key, model_path = model_path, access_key
-            swapped = True
-        should_persist = swapped or missing_any or access_invalid
-        if should_persist:
-            try:
-                self.cfg.set("porcupine_access_key", access_key)
-                self.cfg.set("porcupine_keyword_path", keyword_path)
-                self.cfg.set("porcupine_model_path", model_path)
-                self.cfg.set("porcupine_sensitivity", sensitivity)
-                self.cfg.save()
-            except Exception:
-                pass
-            if enabled:
-                try:
-                    self._on_log("KWS配置已自动纠正（检测到 AccessKey/模型路径异常或缺失）")
-                except Exception:
-                    pass
-        keyword_path = _resolve_kws_path(keyword_path, "sjg_zh_windows_v4_0_0.ppn")
-        model_path = _resolve_kws_path(model_path, "porcupine_params_zh.pv")
+        sherpa_model_dir = _resolve_kws_dir(sherpa_model_dir, "sherpa")
         return {
             "enabled": enabled,
-            "access_key": access_key,
-            "keyword_path": keyword_path,
-            "model_path": model_path,
-            "sensitivity": sensitivity,
+            "provider": provider,
+            "sherpa_model_dir": sherpa_model_dir,
+            "sherpa_tokens_path": sherpa_tokens_path,
+            "sherpa_encoder_path": sherpa_encoder_path,
+            "sherpa_decoder_path": sherpa_decoder_path,
+            "sherpa_joiner_path": sherpa_joiner_path,
+            "sherpa_keywords_file": sherpa_keywords_file,
+            "sherpa_num_threads": sherpa_num_threads,
+            "sherpa_keywords_score": sherpa_keywords_score,
+            "sherpa_keywords_threshold": sherpa_keywords_threshold,
+            "sherpa_max_active_paths": sherpa_max_active_paths,
             "interrupt_fallback_enabled": interrupt_fallback_enabled,
             "interrupt_cooldown_ms": interrupt_cooldown_ms,
         }
@@ -1538,6 +1506,11 @@ class TrayApp(QApplication):
             except Exception:
                 pass
             self._mark_successful_response(text)
+            try:
+                if str(command_name) in ("kws_fallback", "asr_fallback"):
+                    self._arm_manual_command_state()
+            except Exception:
+                pass
             self._on_log("规则三: 发声时收到打断，已回复“嗯”并启动规则四计时")
             self._schedule_idle_prompt_if_possible()
         elif self.ws_clients and was_speaking:
@@ -1546,12 +1519,16 @@ class TrayApp(QApplication):
     def handle_backend_asr(self, text: str):
         """处理后台 ASR 识别到的对话内容"""
         text = self._normalize_text(text)
+        kws_enabled = self._is_kws_enabled()
         was_idle_prompt_stage = bool(self._idle_prompt_sent)
         self._note_activity()
         self._on_log(f"Backend ASR: {text}")
         if self.player_active and self._looks_like_manual_attention_call(text):
             sent_ack = False
             if self.is_speaking or self.awaiting_response or self._awaiting_tts_start:
+                if kws_enabled:
+                    self._on_log(f"已启用KWS打断，忽略ASR托底口令打断: {text}")
+                    return
                 sent_ack = bool(self.is_speaking and self.ws_clients)
                 try:
                     self.handle_audio_interrupt_command("asr_fallback")
@@ -1620,12 +1597,13 @@ class TrayApp(QApplication):
         has_interrupt_keyword = len(matched_keywords) > 0
         loud_interrupt_raw = (peak >= peak_threshold) and (rms >= rms_threshold)
         loud_interrupt = False
-        asr_interrupt_enabled = bool(self.cfg.get("asr_interrupt_enabled", False))
+        asr_interrupt_enabled = bool(self.cfg.get("asr_interrupt_enabled", False)) and (not kws_enabled)
         should_try_interrupt = (self.is_speaking or self.awaiting_response) and asr_interrupt_enabled
         self._on_log(
             "ASR托底打断判定详情: "
             f"text={text!r} clean={clean_text!r} "
             f"is_speaking={self.is_speaking} awaiting_response={self.awaiting_response} "
+            f"kws_enabled={kws_enabled} "
             f"asr_interrupt_enabled={asr_interrupt_enabled} "
             f"should_try_interrupt={should_try_interrupt} "
             f"has_interrupt_keyword={has_interrupt_keyword} matched_keywords={matched_keywords} "
